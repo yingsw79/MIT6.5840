@@ -26,6 +26,35 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type AssignMapTaskArgs struct {
+}
+
+type AssignMapTaskReply struct {
+	Id       int
+	Filename string
+	NReduce  int
+}
+
+type AllMapTasksDoneArgs struct {
+}
+
+type AllMapTasksDoneReply struct {
+	IsDone bool
+}
+
+type NotifyOneMapTaskDoneArgs struct {
+	Id int
+}
+
+type NotifyOneMapTaskDoneReply struct {
+}
+
+type ExitArgs struct {
+}
+
+type ExitReply struct {
+}
+
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
 // Can't use the current directory since
