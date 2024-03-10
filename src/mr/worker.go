@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,120 +34,169 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 	// Your worker implementation here.
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Fatalln("os.Getwd", err)
+	}
+
+	getnReduceReply := &GetnReduceReply{}
+	err = call("Coordinator.GetnReduce", &GetnReduceArgs{}, getnReduceReply)
+	if err != nil {
+		log.Fatalln("Coordinator.GetnReduce", err)
+	}
+	nReduce := getnReduceReply.NReduce
 
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+
+	// The map part
+	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 
-			c, err := rpc.DialHTTP("unix", coordinatorSock())
-			if err != nil {
-				log.Println("dialing:", err)
-				return
-			}
-			defer c.Close()
-
 			for {
 				allMapTasksDoneReply := &AllMapTasksDoneReply{}
-				err = c.Call("Coordinator.AllMapTasksDone", &AllMapTasksDoneArgs{}, allMapTasksDoneReply)
-				if err != nil || allMapTasksDoneReply.IsDone {
+				err := call("Coordinator.AllMapTasksDone", &AllMapTasksDoneArgs{}, allMapTasksDoneReply)
+				if err != nil || allMapTasksDoneReply.Done {
+					log.Println("Map worker exit...")
 					return
 				}
 
 				assignMapTaskReply := &AssignMapTaskReply{}
-				err = c.Call("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply)
+				err = call("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply)
 				if err != nil {
 					log.Println("Coordinator.AssignMapTask:", err)
 					time.Sleep(time.Second)
 					continue
 				}
 
-				f, err := os.Open(assignMapTaskReply.Filename)
-				if err != nil {
-					log.Println("os.Open:", err)
-					continue
-				}
-				content, err := io.ReadAll(bufio.NewReader(f))
-				if err != nil {
-					log.Println("io.ReadAll:", err)
-					continue
-				}
-				f.Close()
+				go func() {
+					fin, err := os.Open(assignMapTaskReply.Filename)
+					if err != nil {
+						log.Println("os.Open:", err)
+						return
+					}
+					defer fin.Close()
+					content, err := io.ReadAll(bufio.NewReader(fin))
+					if err != nil {
+						log.Println("io.ReadAll:", err)
+						return
+					}
 
-				kvs := mapf(assignMapTaskReply.Filename, string(content))
-				
-				fmap := map[int]io.Writer{}
-				dir, _ := os.Getwd()
-				f, err = os.CreateTemp(dir, "tempfile-*.json")
-				if err != nil {
-					log.Println("os.CreateTemp:", err)
-					continue
-				}
-				enc := json.NewEncoder(f)
-				for _, kv := range kvs {
+					kvs := mapf(assignMapTaskReply.Filename, string(content))
 
-					enc.Encode(&kv)
-				}
-				os.Rename(f.Name(), fmt.Sprintf("mr-%v%v", assignMapTaskReply.Id, ihash()%assignMapTaskReply.NReduce))
+					mp := make(map[int]*json.Encoder)
+					for _, kv := range kvs {
+						i := ihash(kv.Key) % nReduce
+						enc, ok := mp[i]
+						if !ok {
+							fout, err := os.CreateTemp(wd, "tempfile-*")
+							if err != nil {
+								log.Println("os.CreateTemp:", err)
+								return
+							}
+							defer func() {
+								fout.Close()
+								os.Rename(fout.Name(), fmt.Sprintf("mr-%d-%d", assignMapTaskReply.Id, i))
+							}()
+							enc = json.NewEncoder(fout)
+							mp[i] = enc
+						}
 
-				err = c.Call("Coordinator.NotifyOneMapTaskDone", &NotifyOneMapTaskDoneArgs{assignMapTaskReply.Id}, &NotifyOneMapTaskDoneReply{})
-				if err != nil {
-					log.Println("Coordinator.NotifyOneMapTaskDone:", err)
-				}
+						if err := enc.Encode(&kv); err != nil {
+							log.Println("Encode:", err)
+							return
+						}
+					}
+
+					err = call("Coordinator.NotifyOneMapTaskDone", &NotifyOneMapTaskDoneArgs{assignMapTaskReply.Id}, &NotifyOneMapTaskDoneReply{})
+					if err != nil {
+						log.Println("Coordinator.NotifyOneMapTaskDone:", err)
+					}
+				}()
 			}
 		}()
 	}
 	wg.Wait()
 
-}
+	// The reduce part
 
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
+	for i := 0; i < nReduce; i++ {
+		wg.Add(1)
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+		go func(n int) {
+			defer wg.Done()
 
-	// fill in the argument(s).
-	args.X = 99
+			fout, err := os.CreateTemp(wd, "tempfile-*")
+			if err != nil {
+				log.Println("os.CreateTemp:", err)
+				return
+			}
+			bw := bufio.NewWriter(fout)
+			defer func() {
+				bw.Flush()
+				fout.Close()
+				os.Rename(fout.Name(), fmt.Sprintf("mr-out-%d", n))
+			}()
 
-	// declare a reply structure.
-	reply := ExampleReply{}
+			files, err := os.ReadDir(wd)
+			if err != nil {
+				log.Println("os.ReadDir", err)
+				return
+			}
 
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
+			mp := make(map[string][]string)
+			for _, file := range files {
+				if !file.IsDir() && strings.HasSuffix(file.Name(), fmt.Sprintf("-%d", n)) {
+					fin, err := os.Open(filepath.Join(wd, file.Name()))
+					if err != nil {
+						log.Println("os.Open:", err)
+						return
+					}
+					defer fin.Close()
+
+					dec := json.NewDecoder(bufio.NewReader(fin))
+					for {
+						var kv KeyValue
+						if err := dec.Decode(&kv); err != nil {
+							if err != io.EOF {
+								log.Println("Decode:", err)
+								return
+							} else {
+								break
+							}
+						}
+						k := kv.Key
+						mp[k] = append(mp[k], kv.Value)
+					}
+				}
+			}
+
+			for k, v := range mp {
+				if _, err := fmt.Fprintf(bw, "%s %s\n", k, reducef(k, v)); err != nil {
+					log.Println("fmt.Fprintf:", err)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	err = call("Coordinator.Shutdown", &ShutdownArgs{}, &ShutdownReply{})
+	if err != nil {
+		log.Println("Coordinator.Shutdown:", err)
 	}
 }
 
 // send an RPC request to the coordinator, wait for the response.
-// usually returns true.
-// returns false if something goes wrong.
-func call(rpcname string, args interface{}, reply interface{}) bool {
+func call(serviceMethod string, args any, reply any) error {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+	c, err := rpc.DialHTTP("unix", coordinatorSock())
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Println("dialing:", err)
+		return err
 	}
 	defer c.Close()
 
-	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
-
-	fmt.Println(err)
-	return false
+	return c.Call(serviceMethod, args, reply)
 }

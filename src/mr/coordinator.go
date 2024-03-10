@@ -2,6 +2,7 @@ package mr
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -14,25 +15,22 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	mu    sync.Mutex
-	tasks []string
-	index int
-	done  map[int]chan struct{}
+	mu      sync.Mutex
+	tasks   []string
+	seq     int
+	pending map[int]chan struct{}
 
 	nTask   int
 	nReduce int
 
-	nDone atomic.Int32
-	exit  atomic.Bool
+	nDone    atomic.Int32
+	shutdown atomic.Bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (c *Coordinator) GetnReduce(_ *GetnReduceArgs, reply *GetnReduceReply) error {
+	reply.NReduce = c.nReduce
 	return nil
 }
 
@@ -40,17 +38,16 @@ func (c *Coordinator) AssignMapTask(_ *AssignMapTaskArgs, reply *AssignMapTaskRe
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.tasks) == 0 {
-		return errors.New("no task to assign")
+		return errors.New("there are currently no tasks to assign")
 	}
 
-	id := c.index
-	c.index++
+	id := c.seq
+	c.seq++
 	filename := c.tasks[len(c.tasks)-1]
 	c.tasks = c.tasks[:len(c.tasks)-1]
 	done := make(chan struct{})
-	c.done[id] = done
+	c.pending[id] = done
 	reply.Id = id
-	reply.NReduce = c.nReduce
 	reply.Filename = filename
 
 	go func() {
@@ -62,7 +59,7 @@ func (c *Coordinator) AssignMapTask(_ *AssignMapTaskArgs, reply *AssignMapTaskRe
 			defer c.mu.Unlock()
 
 			close(done)
-			delete(c.done, id)
+			delete(c.pending, id)
 			c.tasks = append(c.tasks, filename)
 		}
 	}()
@@ -74,24 +71,24 @@ func (c *Coordinator) NotifyOneMapTaskDone(args *NotifyOneMapTaskDoneArgs, _ *No
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	ch, ok := c.done[args.Id]
+	ch, ok := c.pending[args.Id]
 	if !ok {
-		return errors.New("task id does not exist")
+		return fmt.Errorf("task id %d does not exist", args.Id)
 	}
 
 	close(ch)
-	delete(c.done, args.Id)
+	delete(c.pending, args.Id)
 
 	return nil
 }
 
 func (c *Coordinator) AllMapTasksDone(_ *AllMapTasksDoneArgs, reply *AllMapTasksDoneReply) error {
-	reply.IsDone = int(c.nDone.Load()) == c.nTask
+	reply.Done = int(c.nDone.Load()) == c.nTask
 	return nil
 }
 
-func (c *Coordinator) Exit(_ *ExitArgs, _ *ExitReply) error {
-	c.exit.Store(true)
+func (c *Coordinator) Shutdown(_ *ShutdownArgs, _ *ShutdownReply) error {
+	c.shutdown.Store(true)
 	return nil
 }
 
@@ -114,7 +111,7 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	// Your code here.
 
-	return c.exit.Load()
+	return c.shutdown.Load()
 }
 
 // create a Coordinator.
@@ -122,7 +119,7 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
-	c := &Coordinator{tasks: files, done: make(map[int]chan struct{}), nTask: len(files), nReduce: nReduce}
+	c := &Coordinator{tasks: files, pending: make(map[int]chan struct{}), nTask: len(files), nReduce: nReduce}
 	c.server()
 	return c
 }
