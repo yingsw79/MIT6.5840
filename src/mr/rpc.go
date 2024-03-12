@@ -24,7 +24,7 @@ type AssignMapTaskArgs struct {
 }
 
 type AssignMapTaskReply struct {
-	Id       int
+	TaskId   int
 	Filename string
 }
 
@@ -36,7 +36,8 @@ type AllMapTasksDoneReply struct {
 }
 
 type NotifyOneMapTaskDoneArgs struct {
-	Id int
+	TaskId       int
+	Intermediate map[int]string
 }
 
 type NotifyOneMapTaskDoneReply struct {
@@ -46,6 +47,28 @@ type ShutdownArgs struct {
 }
 
 type ShutdownReply struct {
+}
+
+type AssignReduceTaskArgs struct {
+}
+
+type AssignReduceTaskReply struct {
+	TaskId int
+	Files  []string
+}
+
+type NotifyOneReduceTaskDoneArgs struct {
+	TaskId int
+}
+
+type NotifyOneReduceTaskDoneReply struct {
+}
+
+type AllReduceTasksDoneArgs struct {
+}
+
+type AllReduceTasksDoneReply struct {
+	Done bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name

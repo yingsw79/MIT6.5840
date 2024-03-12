@@ -15,15 +15,26 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	mu      sync.Mutex
-	tasks   []string
-	seq     int
-	pending map[int]chan struct{}
 
-	nTask   int
+	// Map
+	mLock    sync.Mutex
+	mTasks   []string
+	mPending map[int]chan struct{}
+	mSeq     int
+
+	nMapTask     int
+	nMapTaskDone atomic.Int32
+
+	// Reduce
 	nReduce int
 
-	nDone    atomic.Int32
+	rLock    sync.Mutex
+	rTasks   map[int][]string
+	rPending map[int]chan struct{}
+
+	nReduceTask     atomic.Int32
+	nReduceTaskDone atomic.Int32
+
 	shutdown atomic.Bool
 }
 
@@ -35,32 +46,34 @@ func (c *Coordinator) GetnReduce(_ *GetnReduceArgs, reply *GetnReduceReply) erro
 }
 
 func (c *Coordinator) AssignMapTask(_ *AssignMapTaskArgs, reply *AssignMapTaskReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.tasks) == 0 {
-		return errors.New("there are currently no tasks to assign")
+	c.mLock.Lock()
+	defer c.mLock.Unlock()
+	if len(c.mTasks) == 0 {
+		return errors.New("there are currently no map tasks to assign")
 	}
 
-	id := c.seq
-	c.seq++
-	filename := c.tasks[len(c.tasks)-1]
-	c.tasks = c.tasks[:len(c.tasks)-1]
+	id := c.mSeq
+	c.mSeq++
+	filename := c.mTasks[len(c.mTasks)-1]
+	c.mTasks = c.mTasks[:len(c.mTasks)-1]
 	done := make(chan struct{})
-	c.pending[id] = done
-	reply.Id = id
+	c.mPending[id] = done
+	reply.TaskId = id
 	reply.Filename = filename
 
 	go func() {
 		select {
 		case <-done:
-			c.nDone.Add(1)
+			log.Printf("[Coordinator]: map task %d: done", id)
+			c.nMapTaskDone.Add(1)
 		case <-time.After(10 * time.Second):
-			c.mu.Lock()
-			defer c.mu.Unlock()
+			log.Printf("[Coordinator]: map task %d: timeout", id)
+			c.mLock.Lock()
+			defer c.mLock.Unlock()
 
 			close(done)
-			delete(c.pending, id)
-			c.tasks = append(c.tasks, filename)
+			delete(c.mPending, id)
+			c.mTasks = append(c.mTasks, filename)
 		}
 	}()
 
@@ -68,27 +81,97 @@ func (c *Coordinator) AssignMapTask(_ *AssignMapTaskArgs, reply *AssignMapTaskRe
 }
 
 func (c *Coordinator) NotifyOneMapTaskDone(args *NotifyOneMapTaskDoneArgs, _ *NotifyOneMapTaskDoneReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mLock.Lock()
+	defer c.mLock.Unlock()
 
-	ch, ok := c.pending[args.Id]
+	ch, ok := c.mPending[args.TaskId]
 	if !ok {
-		return fmt.Errorf("task id %d does not exist", args.Id)
+		return fmt.Errorf("map task %d is not pending", args.TaskId)
 	}
 
 	close(ch)
-	delete(c.pending, args.Id)
+	delete(c.mPending, args.TaskId)
+
+	c.rLock.Lock()
+	defer c.rLock.Unlock()
+	for i, v := range args.Intermediate {
+		if _, ok := c.rTasks[i]; !ok {
+			c.nReduceTask.Add(1)
+		}
+		c.rTasks[i] = append(c.rTasks[i], v)
+	}
 
 	return nil
 }
 
 func (c *Coordinator) AllMapTasksDone(_ *AllMapTasksDoneArgs, reply *AllMapTasksDoneReply) error {
-	reply.Done = int(c.nDone.Load()) == c.nTask
+	reply.Done = int(c.nMapTaskDone.Load()) == c.nMapTask
 	return nil
 }
 
 func (c *Coordinator) Shutdown(_ *ShutdownArgs, _ *ShutdownReply) error {
 	c.shutdown.Store(true)
+	return nil
+}
+
+func (c *Coordinator) AssignReduceTask(_ *AssignReduceTaskArgs, reply *AssignReduceTaskReply) error {
+	c.rLock.Lock()
+	defer c.rLock.Unlock()
+
+	if len(c.rTasks) == 0 {
+		return errors.New("there are currently no reduce tasks to assign")
+	}
+
+	var id int
+	var files []string
+	for i, v := range c.rTasks {
+		id = i
+		files = v
+		break
+	}
+	delete(c.rTasks, id)
+
+	done := make(chan struct{})
+	c.rPending[id] = done
+	reply.TaskId = id
+	reply.Files = files
+
+	go func() {
+		select {
+		case <-done:
+			log.Printf("[Coordinator]: reduce task %d: done", id)
+			c.nReduceTaskDone.Add(1)
+		case <-time.After(10 * time.Second):
+			log.Printf("[Coordinator]: reduce task %d: timeout", id)
+			c.rLock.Lock()
+			defer c.rLock.Unlock()
+
+			close(done)
+			delete(c.rPending, id)
+			c.rTasks[id] = files
+		}
+	}()
+
+	return nil
+}
+
+func (c *Coordinator) NotifyOneReduceTaskDone(args *NotifyOneReduceTaskDoneArgs, _ *NotifyOneReduceTaskDoneReply) error {
+	c.rLock.Lock()
+	defer c.rLock.Unlock()
+
+	ch, ok := c.rPending[args.TaskId]
+	if !ok {
+		return fmt.Errorf("reduce task %d is not pending", args.TaskId)
+	}
+
+	close(ch)
+	delete(c.rPending, args.TaskId)
+
+	return nil
+}
+
+func (c *Coordinator) AllReduceTasksDone(_ *AllReduceTasksDoneArgs, reply *AllReduceTasksDoneReply) error {
+	reply.Done = c.nReduceTaskDone.Load() == c.nReduceTask.Load()
 	return nil
 }
 
@@ -119,7 +202,9 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
-	c := &Coordinator{tasks: files, pending: make(map[int]chan struct{}), nTask: len(files), nReduce: nReduce}
+	c := &Coordinator{mTasks: files, mPending: make(map[int]chan struct{}), nMapTask: len(files),
+		nReduce: nReduce, rTasks: make(map[int][]string), rPending: make(map[int]chan struct{})}
 	c.server()
+	log.Println("[Coordinator]: started")
 	return c
 }
