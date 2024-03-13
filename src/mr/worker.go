@@ -10,6 +10,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,7 @@ type MapWorker struct {
 	wd      string
 	f       func(string, string) []KeyValue
 	tasks   chan *AssignMapTaskReply
+	once    sync.Once
 	done    chan struct{}
 }
 
@@ -42,26 +44,59 @@ func (m *MapWorker) Request() {
 	}
 	defer c.Close()
 
+	m.once.Do(func() {
+		go func() {
+			for {
+				allMapTasksDoneReply := &AllMapTasksDoneReply{}
+				if err := c.Call("Coordinator.AllMapTasksDone", &AllMapTasksDoneArgs{}, allMapTasksDoneReply); err != nil ||
+					allMapTasksDoneReply.Done {
+					close(m.done)
+					return
+				}
+				time.Sleep(time.Second)
+			}
+		}()
+	})
+
 	for {
-		allMapTasksDoneReply := &AllMapTasksDoneReply{}
-		if err := c.Call("Coordinator.AllMapTasksDone", &AllMapTasksDoneArgs{}, allMapTasksDoneReply); err != nil ||
-			allMapTasksDoneReply.Done {
-			close(m.tasks)
+		select {
+		case <-m.done:
 			return
+		default:
 		}
 
 		assignMapTaskReply := &AssignMapTaskReply{}
-		if err := c.Call("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply); err != nil {
-			time.Sleep(time.Second)
-		} else {
-			m.tasks <- assignMapTaskReply
+		select {
+		case <-m.done:
+			return
+		case call := <-c.Go("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply, make(chan *rpc.Call, 1)).Done:
+			if call.Error != nil {
+				time.Sleep(time.Second)
+			} else {
+				select {
+				case <-m.done:
+					return
+				case m.tasks <- assignMapTaskReply:
+				}
+			}
 		}
 	}
 }
 
 func (m *MapWorker) Do() {
-	for task := range m.tasks {
-		m.do(task)
+	for {
+		select {
+		case <-m.done:
+			return
+		default:
+		}
+
+		select {
+		case <-m.done:
+			return
+		case task := <-m.tasks:
+			m.do(task)
+		}
 	}
 }
 
@@ -70,6 +105,10 @@ func (m *MapWorker) Done() <-chan struct{} {
 }
 
 func (m *MapWorker) do(task *AssignMapTaskReply) {
+	if task == nil {
+		return
+	}
+
 	defer func() {
 		if err := recover(); err != nil {
 			log.Println("[MapWorker]:", err)
@@ -141,6 +180,7 @@ type ReduceWorker struct {
 	wd      string
 	f       func(string, []string) string
 	tasks   chan *AssignReduceTaskReply
+	once    sync.Once
 	done    chan struct{}
 }
 
@@ -155,7 +195,6 @@ func (r *ReduceWorker) Request() {
 		allReduceTasksDoneReply := &AllReduceTasksDoneReply{}
 		if err := call("Coordinator.AllReduceTasksDone", &AllReduceTasksDoneArgs{}, allReduceTasksDoneReply); err != nil ||
 			allReduceTasksDoneReply.Done {
-			close(r.tasks)
 			return
 		}
 
@@ -179,6 +218,10 @@ func (r *ReduceWorker) Done() <-chan struct{} {
 }
 
 func (r *ReduceWorker) do(task *AssignReduceTaskReply) {
+	if task == nil {
+		return
+	}
+
 	defer func() {
 		if err := recover(); err != nil {
 			log.Println("[ReduceWorker]:", err)
