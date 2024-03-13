@@ -211,7 +211,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 						panic(err)
 					}
 
-					if err := os.Rename(fout.Name(), fmt.Sprintf("mr-out-%d", workerId)); err != nil {
+					if err := os.Rename(fout.Name(), fmt.Sprintf("mr-out-%d", assignReduceTaskReply.TaskId)); err != nil {
 						panic(err)
 					}
 
