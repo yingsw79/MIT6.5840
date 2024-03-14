@@ -15,17 +15,18 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"6.5840/mr"
 )
 
-var count int
+var count atomic.Int32
 
 func Map(filename string, contents string) []mr.KeyValue {
 	me := os.Getpid()
-	f := fmt.Sprintf("mr-worker-jobcount-%d-%d", me, count)
-	count++
+	f := fmt.Sprintf("mr-worker-jobcount-%d-%d", me, count.Load())
+	count.Add(1)
 	err := ioutil.WriteFile(f, []byte("x"), 0666)
 	if err != nil {
 		panic(err)

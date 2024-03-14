@@ -40,7 +40,7 @@ type MapWorker struct {
 func (m *MapWorker) Request() {
 	c, err := rpc.DialHTTP("unix", coordinatorSock())
 	if err != nil {
-		log.Fatalln("[MapWorker]:", err)
+		log.Fatalln("[MapWorker]: Request:", err)
 	}
 	defer c.Close()
 
@@ -65,21 +65,33 @@ func (m *MapWorker) Request() {
 		default:
 		}
 
+		// assignMapTaskReply := &AssignMapTaskReply{}
+		// select {
+		// case <-m.done:
+		// 	return
+		// case call := <-c.Go("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply, make(chan *rpc.Call, 1)).Done:
+		// 	if call.Error != nil {
+		// 		time.Sleep(time.Second)
+		// 	} else {
+		// 		select {
+		// 		case <-m.done:
+		// 			return
+		// 		case m.tasks <- assignMapTaskReply:
+		// 		}
+		// 	}
+		// }
+
 		assignMapTaskReply := &AssignMapTaskReply{}
-		select {
-		case <-m.done:
-			return
-		case call := <-c.Go("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply, make(chan *rpc.Call, 1)).Done:
-			if call.Error != nil {
-				time.Sleep(time.Second)
-			} else {
-				select {
-				case <-m.done:
-					return
-				case m.tasks <- assignMapTaskReply:
-				}
+		if err := c.Call("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply); err != nil {
+			time.Sleep(time.Second)
+		} else {
+			select {
+			case <-m.done:
+				return
+			case m.tasks <- assignMapTaskReply:
 			}
 		}
+		time.Sleep(time.Second)
 	}
 }
 
@@ -170,46 +182,89 @@ func (m *MapWorker) do(task *AssignMapTaskReply) {
 
 	go func() {
 		if err := call("Coordinator.NotifyOneMapTaskDone", &NotifyOneMapTaskDoneArgs{task.TaskId, intermediate}, &NotifyOneMapTaskDoneReply{}); err != nil {
-			log.Println("[MapWorker]:", err)
+			log.Println("[MapWorker]: NotifyOneMapTaskDone:", err)
 		}
 	}()
 }
 
 type ReduceWorker struct {
-	nReduce int
-	wd      string
-	f       func(string, []string) string
-	tasks   chan *AssignReduceTaskReply
-	once    sync.Once
-	done    chan struct{}
+	wd    string
+	f     func(string, []string) string
+	tasks chan *AssignReduceTaskReply
+	once  sync.Once
+	done  chan struct{}
 }
 
 func (r *ReduceWorker) Request() {
 	c, err := rpc.DialHTTP("unix", coordinatorSock())
 	if err != nil {
-		log.Fatalln("[ReduceWorker]:", err)
+		log.Fatalln("[ReduceWorker]: Request:", err)
 	}
 	defer c.Close()
 
+	r.once.Do(func() {
+		go func() {
+			allReduceTasksDoneReply := &AllReduceTasksDoneReply{}
+			if err := c.Call("Coordinator.AllReduceTasksDone", &AllReduceTasksDoneArgs{}, allReduceTasksDoneReply); err != nil ||
+				allReduceTasksDoneReply.Done {
+				close(r.done)
+				return
+			}
+			time.Sleep(time.Second)
+		}()
+	})
+
 	for {
-		allReduceTasksDoneReply := &AllReduceTasksDoneReply{}
-		if err := call("Coordinator.AllReduceTasksDone", &AllReduceTasksDoneArgs{}, allReduceTasksDoneReply); err != nil ||
-			allReduceTasksDoneReply.Done {
+		select {
+		case <-r.done:
 			return
+		default:
 		}
 
+		// assignReduceTaskReply := &AssignReduceTaskReply{}
+		// select {
+		// case <-r.done:
+		// 	return
+		// case call := <-c.Go("Coordinator.AssignReduceTask", &AssignReduceTaskArgs{}, assignReduceTaskReply, make(chan *rpc.Call, 1)).Done:
+		// 	if call.Error != nil {
+		// 		time.Sleep(time.Second)
+		// 	} else {
+		// 		select {
+		// 		case <-r.done:
+		// 			return
+		// 		case r.tasks <- assignReduceTaskReply:
+		// 		}
+		// 	}
+		// }
+
 		assignReduceTaskReply := &AssignReduceTaskReply{}
-		if err := call("Coordinator.AssignReduceTask", &AssignReduceTaskArgs{}, assignReduceTaskReply); err != nil {
+		if err := c.Call("Coordinator.AssignReduceTask", &AssignReduceTaskArgs{}, assignReduceTaskReply); err != nil {
 			time.Sleep(time.Second)
 		} else {
-			r.tasks <- assignReduceTaskReply
+			select {
+			case <-r.done:
+				return
+			case r.tasks <- assignReduceTaskReply:
+			}
 		}
+		time.Sleep(time.Second)
 	}
 }
 
 func (r *ReduceWorker) Do() {
-	for task := range r.tasks {
-		r.do(task)
+	for {
+		select {
+		case <-r.done:
+			return
+		default:
+		}
+
+		select {
+		case <-r.done:
+			return
+		case task := <-r.tasks:
+			r.do(task)
+		}
 	}
 }
 
@@ -279,7 +334,7 @@ func (r *ReduceWorker) do(task *AssignReduceTaskReply) {
 
 	go func() {
 		if err := call("Coordinator.NotifyOneReduceTaskDone", &NotifyOneReduceTaskDoneArgs{task.TaskId}, &NotifyOneReduceTaskDoneReply{}); err != nil {
-			log.Println("[ReduceWorker]:", err)
+			log.Println("[ReduceWorker]: NotifyOneReduceTaskDone:", err)
 		}
 	}()
 }
@@ -302,8 +357,20 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	nReduce := getnReduceReply.NReduce
 
 	// Map
+	mapWorker := &MapWorker{nReduce: nReduce, wd: wd, f: mapf, tasks: make(chan *AssignMapTaskReply, 10), done: make(chan struct{})}
+	go mapWorker.Request()
+	for i := 0; i < 5; i++ {
+		go mapWorker.Do()
+	}
+	<-mapWorker.Done()
 
 	// Reduce
+	reduceWorker := &ReduceWorker{wd: wd, f: reducef, tasks: make(chan *AssignReduceTaskReply, nReduce), done: make(chan struct{})}
+	go reduceWorker.Request()
+	for i := 0; i < 5; i++ {
+		go reduceWorker.Do()
+	}
+	<-reduceWorker.Done()
 
 	if err := call("Coordinator.Shutdown", &ShutdownArgs{}, &ShutdownReply{}); err != nil {
 		log.Println("[Worker]:", err)
