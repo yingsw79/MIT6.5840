@@ -171,7 +171,7 @@ func (c *Coordinator) NotifyOneReduceTaskDone(args *NotifyOneReduceTaskDoneArgs,
 }
 
 func (c *Coordinator) AllReduceTasksDone(_ *AllReduceTasksDoneArgs, reply *AllReduceTasksDoneReply) error {
-	reply.Done = c.nReduceTaskDone.Load() == c.nReduceTask.Load()
+	reply.Done = int(c.nMapTaskDone.Load()) == c.nMapTask && c.nReduceTaskDone.Load() == c.nReduceTask.Load()
 	return nil
 }
 

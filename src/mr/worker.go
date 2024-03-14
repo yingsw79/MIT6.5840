@@ -40,20 +40,33 @@ type MapWorker struct {
 func (m *MapWorker) Request() {
 	c, err := rpc.DialHTTP("unix", coordinatorSock())
 	if err != nil {
-		log.Fatalln("[MapWorker]: Request:", err)
+		log.Fatalln("[MapWorker]:", err)
 	}
 	defer c.Close()
 
 	m.once.Do(func() {
 		go func() {
+			var tempDelay time.Duration
 			for {
 				allMapTasksDoneReply := &AllMapTasksDoneReply{}
-				if err := c.Call("Coordinator.AllMapTasksDone", &AllMapTasksDoneArgs{}, allMapTasksDoneReply); err != nil ||
-					allMapTasksDoneReply.Done {
+				if err := c.Call("Coordinator.AllMapTasksDone", &AllMapTasksDoneArgs{}, allMapTasksDoneReply); err != nil {
+					if tempDelay == 0 {
+						tempDelay = time.Second
+					} else {
+						tempDelay *= 2
+					}
+					if tempDelay > 10*time.Second {
+						close(m.done)
+						return
+					}
+					log.Println("[MapWorker]:", err)
+					time.Sleep(tempDelay)
+				} else if allMapTasksDoneReply.Done {
 					close(m.done)
 					return
+				} else {
+					time.Sleep(time.Second)
 				}
-				time.Sleep(time.Second)
 			}
 		}()
 	})
@@ -65,33 +78,21 @@ func (m *MapWorker) Request() {
 		default:
 		}
 
-		// assignMapTaskReply := &AssignMapTaskReply{}
-		// select {
-		// case <-m.done:
-		// 	return
-		// case call := <-c.Go("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply, make(chan *rpc.Call, 1)).Done:
-		// 	if call.Error != nil {
-		// 		time.Sleep(time.Second)
-		// 	} else {
-		// 		select {
-		// 		case <-m.done:
-		// 			return
-		// 		case m.tasks <- assignMapTaskReply:
-		// 		}
-		// 	}
-		// }
-
 		assignMapTaskReply := &AssignMapTaskReply{}
-		if err := c.Call("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply); err != nil {
-			time.Sleep(time.Second)
-		} else {
-			select {
-			case <-m.done:
-				return
-			case m.tasks <- assignMapTaskReply:
+		select {
+		case <-m.done:
+			return
+		case call := <-c.Go("Coordinator.AssignMapTask", &AssignMapTaskArgs{}, assignMapTaskReply, make(chan *rpc.Call, 1)).Done:
+			if call.Error != nil {
+				time.Sleep(time.Second)
+			} else {
+				select {
+				case <-m.done:
+					return
+				case m.tasks <- assignMapTaskReply:
+				}
 			}
 		}
-		time.Sleep(time.Second)
 	}
 }
 
@@ -182,7 +183,7 @@ func (m *MapWorker) do(task *AssignMapTaskReply) {
 
 	go func() {
 		if err := call("Coordinator.NotifyOneMapTaskDone", &NotifyOneMapTaskDoneArgs{task.TaskId, intermediate}, &NotifyOneMapTaskDoneReply{}); err != nil {
-			log.Println("[MapWorker]: NotifyOneMapTaskDone:", err)
+			log.Println("[MapWorker]:", err)
 		}
 	}()
 }
@@ -198,19 +199,34 @@ type ReduceWorker struct {
 func (r *ReduceWorker) Request() {
 	c, err := rpc.DialHTTP("unix", coordinatorSock())
 	if err != nil {
-		log.Fatalln("[ReduceWorker]: Request:", err)
+		log.Fatalln("[ReduceWorker]:", err)
 	}
 	defer c.Close()
 
 	r.once.Do(func() {
 		go func() {
-			allReduceTasksDoneReply := &AllReduceTasksDoneReply{}
-			if err := c.Call("Coordinator.AllReduceTasksDone", &AllReduceTasksDoneArgs{}, allReduceTasksDoneReply); err != nil ||
-				allReduceTasksDoneReply.Done {
-				close(r.done)
-				return
+			var tempDelay time.Duration
+			for {
+				allReduceTasksDoneReply := &AllReduceTasksDoneReply{}
+				if err := c.Call("Coordinator.AllReduceTasksDone", &AllReduceTasksDoneArgs{}, allReduceTasksDoneReply); err != nil {
+					if tempDelay == 0 {
+						tempDelay = time.Second
+					} else {
+						tempDelay *= 2
+					}
+					if tempDelay > 10*time.Second {
+						close(r.done)
+						return
+					}
+					log.Println("[ReduceWorker]:", err)
+					time.Sleep(tempDelay)
+				} else if allReduceTasksDoneReply.Done {
+					close(r.done)
+					return
+				} else {
+					time.Sleep(time.Second)
+				}
 			}
-			time.Sleep(time.Second)
 		}()
 	})
 
@@ -221,33 +237,21 @@ func (r *ReduceWorker) Request() {
 		default:
 		}
 
-		// assignReduceTaskReply := &AssignReduceTaskReply{}
-		// select {
-		// case <-r.done:
-		// 	return
-		// case call := <-c.Go("Coordinator.AssignReduceTask", &AssignReduceTaskArgs{}, assignReduceTaskReply, make(chan *rpc.Call, 1)).Done:
-		// 	if call.Error != nil {
-		// 		time.Sleep(time.Second)
-		// 	} else {
-		// 		select {
-		// 		case <-r.done:
-		// 			return
-		// 		case r.tasks <- assignReduceTaskReply:
-		// 		}
-		// 	}
-		// }
-
 		assignReduceTaskReply := &AssignReduceTaskReply{}
-		if err := c.Call("Coordinator.AssignReduceTask", &AssignReduceTaskArgs{}, assignReduceTaskReply); err != nil {
-			time.Sleep(time.Second)
-		} else {
-			select {
-			case <-r.done:
-				return
-			case r.tasks <- assignReduceTaskReply:
+		select {
+		case <-r.done:
+			return
+		case call := <-c.Go("Coordinator.AssignReduceTask", &AssignReduceTaskArgs{}, assignReduceTaskReply, make(chan *rpc.Call, 1)).Done:
+			if call.Error != nil {
+				time.Sleep(time.Second)
+			} else {
+				select {
+				case <-r.done:
+					return
+				case r.tasks <- assignReduceTaskReply:
+				}
 			}
 		}
-		time.Sleep(time.Second)
 	}
 }
 
@@ -334,7 +338,7 @@ func (r *ReduceWorker) do(task *AssignReduceTaskReply) {
 
 	go func() {
 		if err := call("Coordinator.NotifyOneReduceTaskDone", &NotifyOneReduceTaskDoneArgs{task.TaskId}, &NotifyOneReduceTaskDoneReply{}); err != nil {
-			log.Println("[ReduceWorker]: NotifyOneReduceTaskDone:", err)
+			log.Println("[ReduceWorker]:", err)
 		}
 	}()
 }
@@ -359,21 +363,38 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	// Map
 	mapWorker := &MapWorker{nReduce: nReduce, wd: wd, f: mapf, tasks: make(chan *AssignMapTaskReply, 10), done: make(chan struct{})}
 	go mapWorker.Request()
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		go mapWorker.Do()
 	}
 	<-mapWorker.Done()
+	log.Println("[Worker]: all map tasks done")
 
 	// Reduce
 	reduceWorker := &ReduceWorker{wd: wd, f: reducef, tasks: make(chan *AssignReduceTaskReply, nReduce), done: make(chan struct{})}
 	go reduceWorker.Request()
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		go reduceWorker.Do()
 	}
 	<-reduceWorker.Done()
+	log.Println("[Worker]: all reduce tasks done")
 
-	if err := call("Coordinator.Shutdown", &ShutdownArgs{}, &ShutdownReply{}); err != nil {
-		log.Println("[Worker]:", err)
+	var tempDelay time.Duration
+	for {
+		if err := call("Coordinator.Shutdown", &ShutdownArgs{}, &ShutdownReply{}); err != nil {
+			if tempDelay == 0 {
+				tempDelay = time.Second
+			} else {
+				tempDelay *= 2
+			}
+			if tempDelay > 10*time.Second {
+				return
+			}
+			log.Println("[Worker]:", err)
+			time.Sleep(tempDelay)
+		} else {
+			log.Println("[Worker]: exit")
+			return
+		}
 	}
 }
 
