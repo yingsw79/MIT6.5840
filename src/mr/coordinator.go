@@ -22,18 +22,17 @@ type Coordinator struct {
 	mPending map[int]chan struct{}
 	mSeq     int
 
-	nMapTask     int
-	nMapTaskDone atomic.Int32
+	nMap     int
+	nMapDone atomic.Int32
 
 	// Reduce
-	nReduce int
 
 	rLock    sync.Mutex
 	rTasks   map[int][]string
 	rPending map[int]chan struct{}
 
-	nReduceTask     atomic.Int32
-	nReduceTaskDone atomic.Int32
+	nReduce     int
+	nReduceDone atomic.Int32
 
 	shutdown atomic.Bool
 }
@@ -65,7 +64,7 @@ func (c *Coordinator) AssignMapTask(_ *AssignMapTaskArgs, reply *AssignMapTaskRe
 		select {
 		case <-done:
 			log.Printf("[Coordinator]: map task %d: done", id)
-			c.nMapTaskDone.Add(1)
+			c.nMapDone.Add(1)
 		case <-time.After(10 * time.Second):
 			log.Printf("[Coordinator]: map task %d: timeout", id)
 			c.mLock.Lock()
@@ -95,9 +94,6 @@ func (c *Coordinator) NotifyOneMapTaskDone(args *NotifyOneMapTaskDoneArgs, _ *No
 	c.rLock.Lock()
 	defer c.rLock.Unlock()
 	for i, v := range args.Intermediate {
-		if _, ok := c.rTasks[i]; !ok {
-			c.nReduceTask.Add(1)
-		}
 		c.rTasks[i] = append(c.rTasks[i], v)
 	}
 
@@ -105,7 +101,7 @@ func (c *Coordinator) NotifyOneMapTaskDone(args *NotifyOneMapTaskDoneArgs, _ *No
 }
 
 func (c *Coordinator) AllMapTasksDone(_ *AllMapTasksDoneArgs, reply *AllMapTasksDoneReply) error {
-	reply.Done = int(c.nMapTaskDone.Load()) == c.nMapTask
+	reply.Done = int(c.nMapDone.Load()) == c.nMap
 	return nil
 }
 
@@ -140,7 +136,7 @@ func (c *Coordinator) AssignReduceTask(_ *AssignReduceTaskArgs, reply *AssignRed
 		select {
 		case <-done:
 			log.Printf("[Coordinator]: reduce task %d: done", id)
-			c.nReduceTaskDone.Add(1)
+			c.nReduceDone.Add(1)
 		case <-time.After(10 * time.Second):
 			log.Printf("[Coordinator]: reduce task %d: timeout", id)
 			c.rLock.Lock()
@@ -171,7 +167,7 @@ func (c *Coordinator) NotifyOneReduceTaskDone(args *NotifyOneReduceTaskDoneArgs,
 }
 
 func (c *Coordinator) AllReduceTasksDone(_ *AllReduceTasksDoneArgs, reply *AllReduceTasksDoneReply) error {
-	reply.Done = int(c.nMapTaskDone.Load()) == c.nMapTask && c.nReduceTaskDone.Load() == c.nReduceTask.Load()
+	reply.Done = int(c.nMapDone.Load()) == c.nMap && int(c.nReduceDone.Load()) == c.nReduce
 	return nil
 }
 
@@ -202,7 +198,7 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
-	c := &Coordinator{mTasks: files, mPending: make(map[int]chan struct{}), nMapTask: len(files),
+	c := &Coordinator{mTasks: files, mPending: make(map[int]chan struct{}), nMap: len(files),
 		nReduce: nReduce, rTasks: make(map[int][]string), rPending: make(map[int]chan struct{})}
 	c.server()
 	log.Println("[Coordinator]: started")

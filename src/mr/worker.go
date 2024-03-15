@@ -141,43 +141,41 @@ func (m *MapWorker) do(task *AssignMapTaskReply) {
 	}
 
 	kvs := m.f(task.Filename, string(content))
-
-	type info struct {
-		enc    *json.Encoder
-		name   string
-		rename string
-	}
-	infos := make([]*info, m.nReduce)
+	buckets := make([][]KeyValue, m.nReduce)
+	intermediate := make([]string, m.nReduce)
 
 	for _, kv := range kvs {
 		i := ihash(kv.Key) % m.nReduce
-		if infos[i] == nil {
-			fout, err := os.CreateTemp(m.wd, "map-temp*")
-			if err != nil {
-				panic(err)
-			}
-			defer func() {
-				fout.Close()
-				os.Remove(fout.Name())
-			}()
-
-			infos[i] = &info{json.NewEncoder(fout), fout.Name(), filepath.Join(m.wd, fmt.Sprintf("mr-%d-%d", task.TaskId, i))}
-		}
-
-		if err := infos[i].enc.Encode(&kv); err != nil {
-			panic(err)
-		}
+		buckets[i] = append(buckets[i], kv)
 	}
 
-	intermediate := make(map[int]string, m.nReduce)
-	for i, v := range infos {
-		if v == nil {
-			continue
+	for i, bk := range buckets {
+		fout, err := os.CreateTemp(m.wd, "map-temp*")
+		if err != nil {
+			panic(err)
 		}
-		if err := os.Rename(v.name, v.rename); err != nil {
+		defer func() {
+			fout.Close()
+			os.Remove(fout.Name())
+		}()
+
+		bw := bufio.NewWriter(fout)
+		enc := json.NewEncoder(bw)
+		for _, v := range bk {
+			if err := enc.Encode(&v); err != nil {
+				panic(err)
+			}
+		}
+
+		if err := bw.Flush(); err != nil {
+			panic(err)
+		}
+
+		newname := filepath.Join(m.wd, fmt.Sprintf("mr-%d-%d", task.TaskId, i))
+		if err := os.Rename(fout.Name(), newname); err != nil {
 			panic(err)
 		} else {
-			intermediate[i] = v.rename
+			intermediate[i] = newname
 		}
 	}
 
@@ -347,6 +345,7 @@ func (r *ReduceWorker) do(task *AssignReduceTaskReply) {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	log.Println("[Worker]: started")
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -363,18 +362,14 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	// Map
 	mapWorker := &MapWorker{nReduce: nReduce, wd: wd, f: mapf, tasks: make(chan *AssignMapTaskReply, 10), done: make(chan struct{})}
 	go mapWorker.Request()
-	for i := 0; i < 10; i++ {
-		go mapWorker.Do()
-	}
+	go mapWorker.Do()
 	<-mapWorker.Done()
 	log.Println("[Worker]: all map tasks done")
 
 	// Reduce
 	reduceWorker := &ReduceWorker{wd: wd, f: reducef, tasks: make(chan *AssignReduceTaskReply, nReduce), done: make(chan struct{})}
 	go reduceWorker.Request()
-	for i := 0; i < 10; i++ {
-		go reduceWorker.Do()
-	}
+	go reduceWorker.Do()
 	<-reduceWorker.Done()
 	log.Println("[Worker]: all reduce tasks done")
 

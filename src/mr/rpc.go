@@ -37,7 +37,7 @@ type AllMapTasksDoneReply struct {
 
 type NotifyOneMapTaskDoneArgs struct {
 	TaskId       int
-	Intermediate map[int]string
+	Intermediate []string
 }
 
 type NotifyOneMapTaskDoneReply struct {
