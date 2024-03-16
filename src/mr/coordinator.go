@@ -26,7 +26,6 @@ type Coordinator struct {
 	nMapDone atomic.Int32
 
 	// Reduce
-
 	rLock    sync.Mutex
 	rTasks   map[int][]string
 	rPending map[int]chan struct{}

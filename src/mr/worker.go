@@ -362,14 +362,18 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	// Map
 	mapWorker := &MapWorker{nReduce: nReduce, wd: wd, f: mapf, tasks: make(chan *AssignMapTaskReply, 10), done: make(chan struct{})}
 	go mapWorker.Request()
-	go mapWorker.Do()
+	for i := 0; i < 10; i++ {
+		go mapWorker.Do()
+	}
 	<-mapWorker.Done()
 	log.Println("[Worker]: all map tasks done")
 
 	// Reduce
 	reduceWorker := &ReduceWorker{wd: wd, f: reducef, tasks: make(chan *AssignReduceTaskReply, nReduce), done: make(chan struct{})}
 	go reduceWorker.Request()
-	go reduceWorker.Do()
+	for i := 0; i < 10; i++ {
+		go reduceWorker.Do()
+	}
 	<-reduceWorker.Done()
 	log.Println("[Worker]: all reduce tasks done")
 
