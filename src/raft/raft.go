@@ -303,12 +303,15 @@ func (rf *Raft) becomeLeader() {
 	rf.state = StateLeader
 	rf.leaderId = rf.me
 	rf.tickFunc = rf.tickHeartbeat
+
+	idx := 1
+	if len(rf.log) > 0 {
+		idx = rf.log[len(rf.log)-1].Index + 1
+	}
+	rf.log = append(rf.log, Entry{Term: rf.currentTerm, Index: idx})
 	for i := range rf.peers {
-		if i == rf.me {
-			continue
-		}
 		rf.matchIndex[i] = -1
-		rf.nextIndex[i] = rf.log[len(rf.log)-1].Index + 1
+		rf.nextIndex[i] = idx
 	}
 }
 
@@ -335,13 +338,33 @@ func (rf *Raft) tickHeartbeat() {
 
 	if rf.heartbeatElapsed >= rf.heartbeatTimeout {
 		rf.heartbeatElapsed = 0
+
+		prevLogIndex, prevLogTerm := -1, -1
+		nextIndex := rf.nextIndex[rf.me]
+		if nextIndex > 1 {
+			lastEntry := rf.log[len(rf.log)-1]
+			prevLogIndex, prevLogTerm = lastEntry.Index, lastEntry.Term
+		}
+		args := &AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.leaderId,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      []Entry{{Term: rf.currentTerm, Index: nextIndex}},
+			LeaderCommit: rf.commitIndex,
+		}
+		successCount := 1
 		for i := range rf.peers {
 			if i == rf.me {
 				continue
 			}
-			args := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.leaderId}
 			reply := &AppendEntriesReply{}
-			rf.sendAppendEntries(rf.me, args, reply)
+			if rf.sendAppendEntries(i, args, reply) {
+
+			}
+		}
+		if successCount > len(rf.peers)/2+1 {
+			rf.commitIndex++
 		}
 	}
 }
