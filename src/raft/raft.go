@@ -21,6 +21,7 @@ import (
 	//	"bytes"
 
 	"cmp"
+	"log"
 	"math/rand"
 	"slices"
 	"sync"
@@ -353,6 +354,7 @@ func (r *Raft) becomeFollower(term, LeaderId int) {
 	r.state = StateFollower
 	r.leaderId = LeaderId
 	r.tickFunc = r.tickElection
+	log.Printf("%d became follower at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) becomeCandidate() {
@@ -365,6 +367,7 @@ func (r *Raft) becomeCandidate() {
 	r.votedFor = r.me
 	r.votes++
 	r.tickFunc = r.tickElection
+	log.Printf("%d became candidate at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) becomeLeader() {
@@ -385,6 +388,7 @@ func (r *Raft) becomeLeader() {
 		r.matchIndex[i] = 0
 		r.nextIndex[i] = idx
 	}
+	log.Printf("%d became leader at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) reset(term int) {
@@ -421,9 +425,9 @@ func (r *Raft) broadcastElection() {
 		LastLogTerm:  lastLogTerm,
 		LastLogIndex: lastLogIndex,
 	}
-	replies := []*RequestVoteReply{}
 
-	wg := sync.WaitGroup{}
+	replies := make(chan *RequestVoteReply)
+	var wg sync.WaitGroup
 	for i := range r.peers {
 		if i == r.me {
 			continue
@@ -435,23 +439,28 @@ func (r *Raft) broadcastElection() {
 
 			reply := &RequestVoteReply{}
 			if r.sendRequestVote(i, args, reply) {
-				replies = append(replies, reply)
+				replies <- reply
 			}
 		}()
 	}
-	wg.Wait()
 
-	for _, reply := range replies {
+	go func() {
+		wg.Wait()
+		close(replies)
+	}()
+
+	for reply := range replies {
 		if reply.VoteGranted {
 			r.votes++
+			if r.votes >= len(r.peers)/2+1 {
+				r.becomeLeader()
+				r.broadcastHeartbeat()
+				return
+			}
 		} else if reply.Term > r.currentTerm {
 			r.becomeFollower(reply.Term, None)
 			return
 		}
-	}
-
-	if r.votes >= len(r.peers)/2+1 {
-		r.becomeLeader()
 	}
 }
 
@@ -469,9 +478,9 @@ func (r *Raft) broadcastHeartbeat() {
 		LeaderId:     r.leaderId,
 		LeaderCommit: r.commitIndex,
 	}
-	replies := []*AppendEntriesReply{}
 
-	wg := sync.WaitGroup{}
+	replies := make(chan *AppendEntriesReply)
+	var wg sync.WaitGroup
 	for i := range r.peers {
 		if i == r.me {
 			continue
@@ -483,13 +492,17 @@ func (r *Raft) broadcastHeartbeat() {
 
 			reply := &AppendEntriesReply{}
 			if r.sendAppendEntries(i, args, reply) {
-				replies = append(replies, reply)
+				replies <- reply
 			}
 		}()
 	}
-	wg.Wait()
 
-	for _, reply := range replies {
+	go func() {
+		wg.Wait()
+		close(replies)
+	}()
+
+	for reply := range replies {
 		if reply.Term > r.currentTerm {
 			r.becomeFollower(reply.Term, None)
 			return
