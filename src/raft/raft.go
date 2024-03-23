@@ -18,8 +18,6 @@ package raft
 //
 
 import (
-	//	"bytes"
-
 	"cmp"
 	"log"
 	"math/rand"
@@ -28,7 +26,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -90,13 +87,13 @@ type rpcMsg struct {
 	done    chan struct{}
 }
 
-type replyMsg struct {
+type rpcReplyMsg struct {
 	reply any
 }
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	// mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -116,13 +113,12 @@ type Raft struct {
 	electionTimeout           int
 	randomizedElectionTimeout int
 
-	applyCh  chan ApplyMsg
-	handleCh chan any
+	applyCh      chan ApplyMsg
+	msgHandlerCh chan any
+	done         chan struct{}
 
-	done chan struct{}
-
-	tickFunc func()
-	stepFunc func(any)
+	tick func()
+	step func(any)
 
 	currentTerm uint32
 	votedFor    int
@@ -141,10 +137,10 @@ type Raft struct {
 // believes it is the leader.
 func (r *Raft) GetState() (int, bool) {
 	// Your code here (2A).
-	// return int(atomic.LoadUint32(&r.currentTerm)), atomic.LoadUint32(&r.state) == StateLeader
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return int(r.currentTerm), r.state == StateLeader
+	return int(atomic.LoadUint32(&r.currentTerm)), atomic.LoadUint32(&r.state) == StateLeader
+	// r.mu.Lock()
+	// defer r.mu.Unlock()
+	// return int(r.currentTerm), r.state == StateLeader
 }
 
 // save Raft's persistent state to stable storage,
@@ -252,8 +248,7 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	msg := rpcMsg{args: args, reply: reply, handler: r.handleRequestVote, done: make(chan struct{})}
 	select {
-	case r.handleCh <- msg:
-		log.Println("send rpcMsg to handleCh")
+	case r.msgHandlerCh <- msg:
 	case <-r.done:
 		return
 	}
@@ -346,8 +341,7 @@ func (r *Raft) handleAppendEntries(_args any, _reply any) {
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	msg := rpcMsg{args: args, reply: reply, handler: r.handleAppendEntries, done: make(chan struct{})}
 	select {
-	case r.handleCh <- msg:
-		log.Println("send rpcMsg to handleCh")
+	case r.msgHandlerCh <- msg:
 	case <-r.done:
 		return
 	}
@@ -414,8 +408,8 @@ func (r *Raft) becomeFollower(term uint32, LeaderId int) {
 	r.reset(term)
 	r.state = StateFollower
 	r.leaderId = LeaderId
-	r.tickFunc = r.tickElection
-	r.stepFunc = r.stepFollower
+	r.tick = r.tickElection
+	r.step = r.stepFollower
 	log.Printf("%d became follower at term %d", r.me, r.currentTerm)
 }
 
@@ -428,8 +422,8 @@ func (r *Raft) becomeCandidate() {
 	r.state = StateCandidate
 	r.votedFor = r.me
 	r.votes++
-	r.tickFunc = r.tickElection
-	r.stepFunc = r.stepCandidate
+	r.tick = r.tickElection
+	r.step = r.stepCandidate
 	log.Printf("%d became candidate at term %d", r.me, r.currentTerm)
 }
 
@@ -441,8 +435,8 @@ func (r *Raft) becomeLeader() {
 	r.reset(r.currentTerm)
 	r.state = StateLeader
 	r.leaderId = r.me
-	r.tickFunc = r.tickHeartbeat
-	r.stepFunc = r.stepLeader
+	r.tick = r.tickHeartbeat
+	r.step = r.stepLeader
 
 	idx := 1
 	if len(r.log) > 0 {
@@ -468,17 +462,44 @@ func (r *Raft) reset(term uint32) {
 	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
 }
 
+func (r *Raft) stepFollower(reply any) {}
+
+func (r *Raft) stepCandidate(reply any) {
+	switch reply := reply.(type) {
+	case *AppendEntriesReply:
+	case *RequestVoteReply:
+		if reply.VoteGranted {
+			r.votes++
+			if r.votes >= len(r.peers)/2+1 {
+				r.becomeLeader()
+				r.broadcastHeartbeat()
+			}
+		} else if reply.Term > r.currentTerm {
+			r.becomeFollower(reply.Term, None)
+		}
+	}
+}
+
+func (r *Raft) stepLeader(reply any) {
+	switch reply := reply.(type) {
+	case *AppendEntriesReply:
+		if reply.Term > r.currentTerm {
+			r.becomeFollower(reply.Term, None)
+		}
+	case *RequestVoteReply:
+	}
+}
+
 func (r *Raft) tickElection() {
 	r.electionElapsed++
 	if r.electionElapsed >= r.randomizedElectionTimeout {
 		r.electionElapsed = 0
 		r.becomeCandidate()
-		r.broadcastElection()
+		r.broadcastRequestVote()
 	}
 }
 
-func (r *Raft) broadcastElection() {
-	log.Printf("%d started election at term %d", r.me, r.currentTerm)
+func (r *Raft) broadcastRequestVote() {
 	var lastLogTerm uint32
 	var lastLogIndex int
 	if len(r.log) > 0 {
@@ -501,39 +522,11 @@ func (r *Raft) broadcastElection() {
 			reply := &RequestVoteReply{}
 			if r.sendRequestVote(i, args, reply) {
 				select {
-				case r.handleCh <- replyMsg{reply: reply}:
+				case r.msgHandlerCh <- rpcReplyMsg{reply: reply}:
 				case <-r.done:
 				}
 			}
 		}()
-	}
-}
-
-func (r *Raft) stepFollower(_reply any) {}
-
-func (r *Raft) stepCandidate(_reply any) {
-	switch reply := _reply.(type) {
-	case *AppendEntriesReply:
-	case *RequestVoteReply:
-		if reply.VoteGranted {
-			r.votes++
-			if r.votes >= len(r.peers)/2+1 {
-				r.becomeLeader()
-				r.broadcastHeartbeat()
-			}
-		} else if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
-		}
-	}
-}
-
-func (r *Raft) stepLeader(_reply any) {
-	switch reply := _reply.(type) {
-	case *AppendEntriesReply:
-		if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
-		}
-	case *RequestVoteReply:
 	}
 }
 
@@ -561,7 +554,7 @@ func (r *Raft) broadcastHeartbeat() {
 			reply := &AppendEntriesReply{}
 			if r.sendAppendEntries(i, args, reply) {
 				select {
-				case r.handleCh <- replyMsg{reply: reply}:
+				case r.msgHandlerCh <- rpcReplyMsg{reply: reply}:
 				case <-r.done:
 				}
 			}
@@ -606,48 +599,20 @@ func (r *Raft) Kill() {
 	close(r.done)
 }
 
-func (r *Raft) killed() bool {
-	z := atomic.LoadInt32(&r.dead)
-	return z == 1
-}
-
-func (r *Raft) tick() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.tickFunc()
-}
+// func (r *Raft) killed() bool {
+// 	z := atomic.LoadInt32(&r.dead)
+// 	return z == 1
+// }
 
 func (r *Raft) ticker() {
-	for !r.killed() {
+	tk := time.NewTicker(r.tickInterval)
+	defer tk.Stop()
 
-		// Your code here (2A)
-		// Check if a leader election should be started.
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-
-		// ms := 50 + (rand.Int63() % 300)
-		// time.Sleep(time.Duration(ms) * time.Millisecond)
-		time.Sleep(r.tickInterval)
-		r.tick()
-	}
-	// tk := time.NewTicker(r.tickInterval)
-	// defer tk.Stop()
-
-	// for {
-	// 	select {
-	// 	case <-tk.C:
-	// 		r.handleCh <- tickMsg{tick: r.tick}
-	// 	case <-r.done:
-	// 		return
-	// 	}
-	// }
-}
-
-func (r *Raft) msgHandler() {
 	for {
 		select {
-		case msg := <-r.handleCh:
+		case <-tk.C:
+			r.tick()
+		case msg := <-r.msgHandlerCh:
 			r.handleMsg(msg)
 		case <-r.done:
 			return
@@ -656,17 +621,12 @@ func (r *Raft) msgHandler() {
 }
 
 func (r *Raft) handleMsg(msg any) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	switch m := msg.(type) {
+	switch msg := msg.(type) {
 	case rpcMsg:
-		log.Println("handle rpcMsg")
-		m.handler(m.args, m.reply)
-		m.done <- struct{}{}
-	case replyMsg:
-		log.Println("handle replyMsg")
-		r.stepFunc(m.reply)
+		msg.handler(msg.args, msg.reply)
+		close(msg.done)
+	case rpcReplyMsg:
+		r.step(msg.reply)
 	}
 }
 
@@ -692,7 +652,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		votedFor:         None,
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
-		handleCh:         make(chan any, 100),
+		msgHandlerCh:     make(chan any),
 		done:             make(chan struct{}),
 	}
 	// Your initialization code here (2A, 2B, 2C).
@@ -701,9 +661,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	r.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	for i := 0; i < 10; i++ {
-		go r.msgHandler()
-	}
 	go r.ticker()
 
 	return r
