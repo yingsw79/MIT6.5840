@@ -80,15 +80,29 @@ type Entry struct {
 	Data  []byte
 }
 
-type rpcMsg struct {
+type msgHandler interface {
+	handle()
+}
+
+type rpcMsgHandler struct {
 	args    any
 	reply   any
 	handler func(any, any)
 	done    chan struct{}
 }
 
-type rpcReplyMsg struct {
-	reply any
+func (h rpcMsgHandler) handle() {
+	h.handler(h.args, h.reply)
+	close(h.done)
+}
+
+type rpcReplyMsgHandler struct {
+	reply   any
+	handler *Raft
+}
+
+func (h rpcReplyMsgHandler) handle() {
+	h.handler.step(h.reply)
 }
 
 // A Go object implementing a single Raft peer.
@@ -114,7 +128,7 @@ type Raft struct {
 	randomizedElectionTimeout int
 
 	applyCh      chan ApplyMsg
-	msgHandlerCh chan any
+	msgHandlerCh chan msgHandler
 	done         chan struct{}
 
 	tick func()
@@ -246,7 +260,7 @@ func (r *Raft) handleRequestVote(_args any, _reply any) {
 // example RequestVote RPC handler.
 func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	msg := rpcMsg{args: args, reply: reply, handler: r.handleRequestVote, done: make(chan struct{})}
+	msg := rpcMsgHandler{args: args, reply: reply, handler: r.handleRequestVote, done: make(chan struct{})}
 	select {
 	case r.msgHandlerCh <- msg:
 	case <-r.done:
@@ -339,7 +353,7 @@ func (r *Raft) handleAppendEntries(_args any, _reply any) {
 }
 
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	msg := rpcMsg{args: args, reply: reply, handler: r.handleAppendEntries, done: make(chan struct{})}
+	msg := rpcMsgHandler{args: args, reply: reply, handler: r.handleAppendEntries, done: make(chan struct{})}
 	select {
 	case r.msgHandlerCh <- msg:
 	case <-r.done:
@@ -462,20 +476,36 @@ func (r *Raft) reset(term uint32) {
 	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
 }
 
-func (r *Raft) stepFollower(reply any) {}
+func (r *Raft) stepFollower(reply any) {
+	switch reply := reply.(type) {
+	case *AppendEntriesReply:
+		if reply.Term > r.currentTerm {
+			r.becomeFollower(reply.Term, None)
+		}
+	case *RequestVoteReply:
+		if reply.Term > r.currentTerm {
+			r.becomeFollower(reply.Term, None)
+		}
+	}
+}
 
 func (r *Raft) stepCandidate(reply any) {
 	switch reply := reply.(type) {
 	case *AppendEntriesReply:
+		if reply.Term > r.currentTerm {
+			r.becomeFollower(reply.Term, None)
+		}
 	case *RequestVoteReply:
-		if reply.VoteGranted {
+		if reply.Term < r.currentTerm {
+			return
+		} else if reply.Term > r.currentTerm {
+			r.becomeFollower(reply.Term, None)
+		} else if reply.VoteGranted {
 			r.votes++
 			if r.votes >= len(r.peers)/2+1 {
 				r.becomeLeader()
 				r.broadcastHeartbeat()
 			}
-		} else if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
 		}
 	}
 }
@@ -486,7 +516,11 @@ func (r *Raft) stepLeader(reply any) {
 		if reply.Term > r.currentTerm {
 			r.becomeFollower(reply.Term, None)
 		}
+		// TODO
 	case *RequestVoteReply:
+		if reply.Term > r.currentTerm {
+			r.becomeFollower(reply.Term, None)
+		}
 	}
 }
 
@@ -522,7 +556,7 @@ func (r *Raft) broadcastRequestVote() {
 			reply := &RequestVoteReply{}
 			if r.sendRequestVote(i, args, reply) {
 				select {
-				case r.msgHandlerCh <- rpcReplyMsg{reply: reply}:
+				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
 				case <-r.done:
 				}
 			}
@@ -554,7 +588,7 @@ func (r *Raft) broadcastHeartbeat() {
 			reply := &AppendEntriesReply{}
 			if r.sendAppendEntries(i, args, reply) {
 				select {
-				case r.msgHandlerCh <- rpcReplyMsg{reply: reply}:
+				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
 				case <-r.done:
 				}
 			}
@@ -612,21 +646,11 @@ func (r *Raft) ticker() {
 		select {
 		case <-tk.C:
 			r.tick()
-		case msg := <-r.msgHandlerCh:
-			r.handleMsg(msg)
+		case h := <-r.msgHandlerCh:
+			h.handle()
 		case <-r.done:
 			return
 		}
-	}
-}
-
-func (r *Raft) handleMsg(msg any) {
-	switch msg := msg.(type) {
-	case rpcMsg:
-		msg.handler(msg.args, msg.reply)
-		close(msg.done)
-	case rpcReplyMsg:
-		r.step(msg.reply)
 	}
 }
 
@@ -652,7 +676,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		votedFor:         None,
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
-		msgHandlerCh:     make(chan any),
+		msgHandlerCh:     make(chan msgHandler),
 		done:             make(chan struct{}),
 	}
 	// Your initialization code here (2A, 2B, 2C).
