@@ -20,9 +20,7 @@ package raft
 import (
 	"cmp"
 	"log"
-	"math/rand"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,22 +48,6 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-type lockedRand struct {
-	mu   sync.Mutex
-	rand *rand.Rand
-}
-
-func (r *lockedRand) Intn(n int) int {
-	r.mu.Lock()
-	v := r.rand.Intn(n)
-	r.mu.Unlock()
-	return v
-}
-
-var globalRand = &lockedRand{
-	rand: rand.New(rand.NewSource(time.Now().UnixNano())),
-}
-
 const None int = -1
 
 const (
@@ -75,34 +57,9 @@ const (
 )
 
 type Entry struct {
-	Term  uint32
-	Index int
-	Data  []byte
-}
-
-type msgHandler interface {
-	handle()
-}
-
-type rpcMsgHandler struct {
-	args    any
-	reply   any
-	handler func(any, any)
-	done    chan struct{}
-}
-
-func (h rpcMsgHandler) handle() {
-	h.handler(h.args, h.reply)
-	close(h.done)
-}
-
-type rpcReplyMsgHandler struct {
-	reply   any
-	handler *Raft
-}
-
-func (h rpcReplyMsgHandler) handle() {
-	h.handler.step(h.reply)
+	Term    uint32
+	Index   int
+	Command any
 }
 
 // A Go object implementing a single Raft peer.
@@ -136,7 +93,10 @@ type Raft struct {
 
 	currentTerm uint32
 	votedFor    int
-	log         []Entry
+
+	log          []Entry
+	lastLogIndex int
+	lastLogTerm  uint32
 
 	leaderId int
 
@@ -151,10 +111,9 @@ type Raft struct {
 // believes it is the leader.
 func (r *Raft) GetState() (int, bool) {
 	// Your code here (2A).
-	return int(atomic.LoadUint32(&r.currentTerm)), atomic.LoadUint32(&r.state) == StateLeader
-	// r.mu.Lock()
-	// defer r.mu.Unlock()
-	// return int(r.currentTerm), r.state == StateLeader
+	term := int(atomic.LoadUint32(&r.currentTerm))
+	isLeader := atomic.LoadUint32(&r.state) == StateLeader
+	return term, isLeader
 }
 
 // save Raft's persistent state to stable storage,
@@ -204,24 +163,6 @@ func (r *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         uint32
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  uint32
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        uint32
-	VoteGranted bool
-}
-
 func (r *Raft) handleRequestVote(_args any, _reply any) {
 	args := _args.(*RequestVoteArgs)
 	reply := _reply.(*RequestVoteReply)
@@ -260,7 +201,12 @@ func (r *Raft) handleRequestVote(_args any, _reply any) {
 // example RequestVote RPC handler.
 func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	msg := rpcMsgHandler{args: args, reply: reply, handler: r.handleRequestVote, done: make(chan struct{})}
+	msg := rpcMsgHandler{
+		args:    args,
+		reply:   reply,
+		handler: r.handleRequestVote,
+		done:    make(chan struct{}),
+	}
 	select {
 	case r.msgHandlerCh <- msg:
 	case <-r.done:
@@ -303,20 +249,6 @@ func (r *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Request
 	return r.peers[server].Call("Raft.RequestVote", args, reply)
 }
 
-type AppendEntriesArgs struct {
-	Term         uint32
-	LeaderId     int
-	PrevLogIndex int
-	PrevLogTerm  uint32
-	Entries      []Entry
-	LeaderCommit int
-}
-
-type AppendEntriesReply struct {
-	Term    uint32
-	Success bool
-}
-
 func (r *Raft) handleAppendEntries(_args any, _reply any) {
 	args := _args.(*AppendEntriesArgs)
 	reply := _reply.(*AppendEntriesReply)
@@ -353,7 +285,12 @@ func (r *Raft) handleAppendEntries(_args any, _reply any) {
 }
 
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	msg := rpcMsgHandler{args: args, reply: reply, handler: r.handleAppendEntries, done: make(chan struct{})}
+	msg := rpcMsgHandler{
+		args:    args,
+		reply:   reply,
+		handler: r.handleAppendEntries,
+		done:    make(chan struct{}),
+	}
 	select {
 	case r.msgHandlerCh <- msg:
 	case <-r.done:
@@ -370,52 +307,44 @@ func (r *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *App
 }
 
 // func (r *Raft) broadcastAppendEntries() {
-// 	successCount := 1
+// 	args := &AppendEntriesArgs{
+// 		Term:         r.currentTerm,
+// 		LeaderId:     r.leaderId,
+// 		LeaderCommit: r.commitIndex,
+// 	}
 
-// 	wg := sync.WaitGroup{}
 // 	for i := range r.peers {
 // 		if i == r.me {
 // 			continue
 // 		}
 
-// 		wg.Add(1)
 // 		go func() {
-// 			defer wg.Done()
-
-// 			args := &AppendEntriesArgs{
-// 				Term:         r.currentTerm,
-// 				LeaderId:     r.leaderId,
-// 				LeaderCommit: r.commitIndex,
-// 			}
-// 			idx := len(r.log) - 1
-// 			for {
-// 				var prevLogIndex, prevLogTerm int
-// 				if idx > 0 {
-// 					prevEntry := r.log[idx-1]
-// 					prevLogIndex, prevLogTerm = prevEntry.Index, prevEntry.Term
-// 				}
-// 				args.PrevLogIndex = prevLogIndex
-// 				args.PrevLogTerm = prevLogTerm
-// 				args.Entries = r.log[idx:]
-// 				reply := &AppendEntriesReply{}
-// 				if r.sendAppendEntries(i, args, reply) {
-// 					if reply.Success {
-// 						return
-// 					} else {
-// 						idx--
-// 					}
-// 				} else {
-// 					return
-// 				}
-// 			}
+// 			// idx := len(r.log) - 1
+// 			// var prevLogIndex, prevLogTerm int
+// 			// if idx > 0 {
+// 			// 	prevEntry := r.log[idx-1]
+// 			// 	prevLogIndex, prevLogTerm = prevEntry.Index, prevEntry.Term
+// 			// }
+// 			// args.PrevLogIndex = prevLogIndex
+// 			// args.PrevLogTerm = prevLogTerm
+// 			// args.Entries = r.log[idx:]
+// 			// reply := &AppendEntriesReply{}
+// 			// if r.sendAppendEntries(i, args, reply) {
+// 			// 	if reply.Success {
+// 			// 		return
+// 			// 	} else {
+// 			// 		idx--
+// 			// 	}
+// 			// } else {
+// 			// 	return
+// 			// }
 // 		}()
 // 	}
-// 	wg.Wait()
 
-// 	if successCount > len(r.peers)/2+1 {
-// 		r.commitIndex++
-// 		r.lastApplied++
-// 	}
+// 	// if successCount >= len(r.peers)/2+1 {
+// 	// 	r.commitIndex++
+// 	// 	r.lastApplied++
+// 	// }
 // }
 
 func (r *Raft) becomeFollower(term uint32, LeaderId int) {
@@ -476,31 +405,31 @@ func (r *Raft) reset(term uint32) {
 	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
 }
 
-func (r *Raft) stepFollower(reply any) {
-	switch reply := reply.(type) {
+func (r *Raft) stepFollower(msg any) {
+	switch msg := msg.(type) {
 	case *AppendEntriesReply:
-		if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
+		if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
 		}
 	case *RequestVoteReply:
-		if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
+		if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
 		}
 	}
 }
 
-func (r *Raft) stepCandidate(reply any) {
-	switch reply := reply.(type) {
+func (r *Raft) stepCandidate(msg any) {
+	switch msg := msg.(type) {
 	case *AppendEntriesReply:
-		if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
+		if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
 		}
 	case *RequestVoteReply:
-		if reply.Term < r.currentTerm {
+		if msg.Term < r.currentTerm {
 			return
-		} else if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
-		} else if reply.VoteGranted {
+		} else if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
+		} else if msg.VoteGranted {
 			r.votes++
 			if r.votes >= len(r.peers)/2+1 {
 				r.becomeLeader()
@@ -510,17 +439,19 @@ func (r *Raft) stepCandidate(reply any) {
 	}
 }
 
-func (r *Raft) stepLeader(reply any) {
-	switch reply := reply.(type) {
+func (r *Raft) stepLeader(msg any) {
+	switch msg := msg.(type) {
 	case *AppendEntriesReply:
-		if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
+		if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
 		}
 		// TODO
 	case *RequestVoteReply:
-		if reply.Term > r.currentTerm {
-			r.becomeFollower(reply.Term, None)
+		if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
 		}
+	case *ApplyMsg:
+		// TODO
 	}
 }
 
@@ -609,11 +540,26 @@ func (r *Raft) broadcastHeartbeat() {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (r *Raft) Start(command any) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (2B).
+	index := -1
+	term := int(atomic.LoadUint32(&r.currentTerm))
+	isLeader := atomic.LoadUint32(&r.state) == StateLeader
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	r.lastLogIndex++
+	index = r.lastLogIndex
+
+	go func() {
+		select {
+		case r.msgHandlerCh <- serviceMsgHandler{
+			msg:     &ApplyMsg{Command: command, CommandIndex: index},
+			handler: r,
+		}:
+		case <-r.done:
+		}
+	}()
 
 	return index, term, isLeader
 }
