@@ -183,14 +183,7 @@ func (r *Raft) handleRequestVote(_args any, _reply any) {
 		return
 	}
 
-	var lastLogTerm uint32
-	var lastLogIndex int
-	if len(r.log) > 0 {
-		lastLog := r.log[len(r.log)-1]
-		lastLogTerm, lastLogIndex = lastLog.Term, lastLog.Index
-	}
-
-	if cmp.Or(cmp.Compare(args.LastLogTerm, lastLogTerm), cmp.Compare(args.LastLogIndex, lastLogIndex)) >= 0 {
+	if cmp.Or(cmp.Compare(args.LastLogTerm, r.lastLogTerm), cmp.Compare(args.LastLogIndex, r.lastLogIndex)) >= 0 {
 		reply.VoteGranted = true
 		r.votedFor = args.CandidateId
 	} else {
@@ -306,7 +299,7 @@ func (r *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *App
 	return r.peers[server].Call("Raft.AppendEntries", args, reply)
 }
 
-// func (r *Raft) broadcastAppendEntries() {
+// func (r *Raft) broadcastAppendEntries(command any) {
 // 	args := &AppendEntriesArgs{
 // 		Term:         r.currentTerm,
 // 		LeaderId:     r.leaderId,
@@ -381,13 +374,9 @@ func (r *Raft) becomeLeader() {
 	r.tick = r.tickHeartbeat
 	r.step = r.stepLeader
 
-	idx := 1
-	if len(r.log) > 0 {
-		idx = r.log[len(r.log)-1].Index + 1
-	}
 	for i := range r.peers {
-		r.matchIndex[i] = 0
-		r.nextIndex[i] = idx
+		r.matchIndex[i] = None
+		r.nextIndex[i] = r.lastLogIndex
 	}
 	log.Printf("%d became leader at term %d", r.me, r.currentTerm)
 }
@@ -465,17 +454,11 @@ func (r *Raft) tickElection() {
 }
 
 func (r *Raft) broadcastRequestVote() {
-	var lastLogTerm uint32
-	var lastLogIndex int
-	if len(r.log) > 0 {
-		lastLog := r.log[len(r.log)-1]
-		lastLogTerm, lastLogIndex = lastLog.Term, lastLog.Index
-	}
 	args := &RequestVoteArgs{
 		Term:         r.currentTerm,
 		CandidateId:  r.me,
-		LastLogTerm:  lastLogTerm,
-		LastLogIndex: lastLogIndex,
+		LastLogTerm:  r.lastLogTerm,
+		LastLogIndex: r.lastLogIndex,
 	}
 
 	for i := range r.peers {
@@ -548,18 +531,18 @@ func (r *Raft) Start(command any) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	r.lastLogIndex++
-	index = r.lastLogIndex
+	// r.lastLogIndex++
+	// index = r.lastLogIndex
 
-	go func() {
-		select {
-		case r.msgHandlerCh <- serviceMsgHandler{
-			msg:     &ApplyMsg{Command: command, CommandIndex: index},
-			handler: r,
-		}:
-		case <-r.done:
-		}
-	}()
+	// go func() {
+	// 	select {
+	// 	case r.msgHandlerCh <- serviceMsgHandler{
+	// 		msg:     &ApplyMsg{Command: command, CommandIndex: index},
+	// 		handler: r,
+	// 	}:
+	// 	case <-r.done:
+	// 	}
+	// }()
 
 	return index, term, isLeader
 }
@@ -620,6 +603,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartbeatTimeout: 1,
 		electionTimeout:  10,
 		votedFor:         None,
+		lastLogIndex:     None,
+		commitIndex:      None,
+		lastApplied:      None,
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
 		msgHandlerCh:     make(chan msgHandler),

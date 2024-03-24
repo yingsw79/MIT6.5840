@@ -47,17 +47,20 @@ func (h rpcReplyMsgHandler) handle() {
 	h.handler.step(h.reply)
 }
 
-type serviceMsgHandler struct {
-	msg     *ApplyMsg
-	handler *Raft
-}
+// type serviceMsgHandler struct {
+// 	msg     *ApplyMsg
+// 	handler *Raft
+// }
 
-func (h serviceMsgHandler) handle() {
-	h.handler.step(h.msg)
-	go func() {
-		select {
-		case h.handler.applyCh <- *h.msg:
-		case <-h.handler.done:
-		}
-	}()
-}
+// func (h serviceMsgHandler) handle() {
+// 	h.handler.step(h.msg)
+// 	go func() {
+// 		select {
+// 		case h.handler.applyCh <- *h.msg:
+// 		case <-h.handler.done:
+// 		}
+// 	}()
+// }
+
+// type tracker struct {
+// }
