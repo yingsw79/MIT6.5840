@@ -18,6 +18,18 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type Entry struct {
+	Term    uint32
+	Index   int
+	Command any
+}
+
+type FastBackup struct {
+	XTerm  uint32
+	XIndex int
+	XLen   int
+}
+
 type AppendEntriesArgs struct {
 	Term         uint32
 	LeaderId     int
@@ -28,6 +40,19 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    uint32
-	Success bool
+	Term       uint32
+	Success    bool
+	FollowerId int
+	Backup     FastBackup
 }
+
+// type HeartbeatArgs struct {
+// 	Term         uint32
+// 	LeaderId     int
+// 	LeaderCommit int
+// }
+
+// type HeartbeatReply struct {
+// 	Term    uint32
+// 	Success bool
+// }

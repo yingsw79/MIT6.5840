@@ -18,9 +18,8 @@ package raft
 //
 
 import (
-	"cmp"
 	"log"
-	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -56,15 +55,9 @@ const (
 	StateLeader
 )
 
-type Entry struct {
-	Term    uint32
-	Index   int
-	Command any
-}
-
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	// mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -94,14 +87,9 @@ type Raft struct {
 	currentTerm uint32
 	votedFor    int
 
-	log          []Entry
-	lastLogIndex int
-	lastLogTerm  uint32
+	log *raftLog
 
 	leaderId int
-
-	commitIndex int
-	lastApplied int
 
 	nextIndex  []int
 	matchIndex []int
@@ -183,7 +171,7 @@ func (r *Raft) handleRequestVote(_args any, _reply any) {
 		return
 	}
 
-	if cmp.Or(cmp.Compare(args.LastLogTerm, r.lastLogTerm), cmp.Compare(args.LastLogIndex, r.lastLogIndex)) >= 0 {
+	if r.log.isUpToDate(args.LastLogTerm, args.LastLogIndex) {
 		reply.VoteGranted = true
 		r.votedFor = args.CandidateId
 	} else {
@@ -242,10 +230,36 @@ func (r *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Request
 	return r.peers[server].Call("Raft.RequestVote", args, reply)
 }
 
+func (r *Raft) broadcastRequestVote() {
+	args := &RequestVoteArgs{
+		Term:         r.currentTerm,
+		CandidateId:  r.me,
+		LastLogTerm:  r.log.lastLogTerm(),
+		LastLogIndex: r.log.lastLogIndex(),
+	}
+
+	for i := range r.peers {
+		if i == r.me {
+			continue
+		}
+
+		go func() {
+			reply := &RequestVoteReply{}
+			if r.sendRequestVote(i, args, reply) {
+				select {
+				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
+				case <-r.done:
+				}
+			}
+		}()
+	}
+}
+
 func (r *Raft) handleAppendEntries(_args any, _reply any) {
 	args := _args.(*AppendEntriesArgs)
 	reply := _reply.(*AppendEntriesReply)
 
+	reply.FollowerId = r.me
 	if args.Term < r.currentTerm {
 		reply.Term = r.currentTerm
 		reply.Success = false
@@ -253,25 +267,13 @@ func (r *Raft) handleAppendEntries(_args any, _reply any) {
 	}
 
 	r.becomeFollower(args.Term, args.LeaderId)
-
 	reply.Term = r.currentTerm
-	if len(args.Entries) == 0 {
-		reply.Success = true
-		return
-	}
 
-	i, ok := slices.BinarySearchFunc(r.log, Entry{Term: args.PrevLogTerm, Index: args.PrevLogIndex}, func(e1, e2 Entry) int {
-		return cmp.Or(cmp.Compare(e1.Term, e2.Term), cmp.Compare(e1.Index, e2.Index))
-	})
-	if !ok {
+	backup := r.log.maybeAppend(args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit, args.Entries)
+	if backup != nil {
 		reply.Success = false
+		reply.Backup = *backup
 		return
-	}
-
-	r.log = append(r.log[i+1:], args.Entries...)
-
-	if args.LeaderCommit > r.commitIndex {
-		r.commitIndex = min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
 	}
 
 	reply.Success = true
@@ -299,46 +301,32 @@ func (r *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *App
 	return r.peers[server].Call("Raft.AppendEntries", args, reply)
 }
 
-// func (r *Raft) broadcastAppendEntries(command any) {
-// 	args := &AppendEntriesArgs{
-// 		Term:         r.currentTerm,
-// 		LeaderId:     r.leaderId,
-// 		LeaderCommit: r.commitIndex,
-// 	}
+func (r *Raft) broadcastAppendEntries() {
+	args := &AppendEntriesArgs{
+		Term:         r.currentTerm,
+		LeaderId:     r.leaderId,
+		LeaderCommit: r.log.commitIndex,
+	}
 
-// 	for i := range r.peers {
-// 		if i == r.me {
-// 			continue
-// 		}
+	for i := range r.peers {
+		if i == r.me {
+			continue
+		}
 
-// 		go func() {
-// 			// idx := len(r.log) - 1
-// 			// var prevLogIndex, prevLogTerm int
-// 			// if idx > 0 {
-// 			// 	prevEntry := r.log[idx-1]
-// 			// 	prevLogIndex, prevLogTerm = prevEntry.Index, prevEntry.Term
-// 			// }
-// 			// args.PrevLogIndex = prevLogIndex
-// 			// args.PrevLogTerm = prevLogTerm
-// 			// args.Entries = r.log[idx:]
-// 			// reply := &AppendEntriesReply{}
-// 			// if r.sendAppendEntries(i, args, reply) {
-// 			// 	if reply.Success {
-// 			// 		return
-// 			// 	} else {
-// 			// 		idx--
-// 			// 	}
-// 			// } else {
-// 			// 	return
-// 			// }
-// 		}()
-// 	}
-
-// 	// if successCount >= len(r.peers)/2+1 {
-// 	// 	r.commitIndex++
-// 	// 	r.lastApplied++
-// 	// }
-// }
+		go func() {
+			args.PrevLogIndex = r.nextIndex[i] - 1
+			args.PrevLogTerm = r.log.term(r.nextIndex[i] - 1)
+			args.Entries = r.log.rslice(r.nextIndex[i])
+			reply := &AppendEntriesReply{}
+			if r.sendAppendEntries(i, args, reply) {
+				select {
+				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
+				case <-r.done:
+				}
+			}
+		}()
+	}
+}
 
 func (r *Raft) becomeFollower(term uint32, LeaderId int) {
 	r.reset(term)
@@ -375,8 +363,8 @@ func (r *Raft) becomeLeader() {
 	r.step = r.stepLeader
 
 	for i := range r.peers {
-		r.matchIndex[i] = None
-		r.nextIndex[i] = r.lastLogIndex
+		r.matchIndex[i] = 0
+		r.nextIndex[i] = r.log.lastLogIndex() + 1
 	}
 	log.Printf("%d became leader at term %d", r.me, r.currentTerm)
 }
@@ -422,7 +410,7 @@ func (r *Raft) stepCandidate(msg any) {
 			r.votes++
 			if r.votes >= len(r.peers)/2+1 {
 				r.becomeLeader()
-				r.broadcastHeartbeat()
+				r.broadcastAppendEntries()
 			}
 		}
 	}
@@ -440,7 +428,9 @@ func (r *Raft) stepLeader(msg any) {
 			r.becomeFollower(msg.Term, None)
 		}
 	case *ApplyMsg:
-		// TODO
+		index = r.log.lastLogIndex() + 1
+		r.log.append(index, Entry{Term: term, Index: index, Command: command})
+		r.broadcastAppendEntries()
 	}
 }
 
@@ -453,62 +443,37 @@ func (r *Raft) tickElection() {
 	}
 }
 
-func (r *Raft) broadcastRequestVote() {
-	args := &RequestVoteArgs{
-		Term:         r.currentTerm,
-		CandidateId:  r.me,
-		LastLogTerm:  r.lastLogTerm,
-		LastLogIndex: r.lastLogIndex,
-	}
-
-	for i := range r.peers {
-		if i == r.me {
-			continue
-		}
-
-		go func() {
-			reply := &RequestVoteReply{}
-			if r.sendRequestVote(i, args, reply) {
-				select {
-				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-				case <-r.done:
-				}
-			}
-		}()
-	}
-}
-
 func (r *Raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
-		r.broadcastHeartbeat()
+		r.broadcastAppendEntries()
 	}
 }
 
-func (r *Raft) broadcastHeartbeat() {
-	args := &AppendEntriesArgs{
-		Term:         r.currentTerm,
-		LeaderId:     r.leaderId,
-		LeaderCommit: r.commitIndex,
-	}
+// func (r *Raft) broadcastHeartbeat() {
+// 	args := &AppendEntriesArgs{
+// 		Term:         r.currentTerm,
+// 		LeaderId:     r.leaderId,
+// 		LeaderCommit: r.commitIndex,
+// 	}
 
-	for i := range r.peers {
-		if i == r.me {
-			continue
-		}
+// 	for i := range r.peers {
+// 		if i == r.me {
+// 			continue
+// 		}
 
-		go func() {
-			reply := &AppendEntriesReply{}
-			if r.sendAppendEntries(i, args, reply) {
-				select {
-				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-				case <-r.done:
-				}
-			}
-		}()
-	}
-}
+// 		go func() {
+// 			reply := &AppendEntriesReply{}
+// 			if r.sendAppendEntries(i, args, reply) {
+// 				select {
+// 				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
+// 				case <-r.done:
+// 				}
+// 			}
+// 		}()
+// 	}
+// }
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -524,27 +489,19 @@ func (r *Raft) broadcastHeartbeat() {
 // the leader.
 func (r *Raft) Start(command any) (int, int, bool) {
 	// Your code here (2B).
+
 	index := -1
-	term := int(atomic.LoadUint32(&r.currentTerm))
+	term := atomic.LoadUint32(&r.currentTerm)
 	isLeader := atomic.LoadUint32(&r.state) == StateLeader
 	if !isLeader {
-		return index, term, isLeader
+		return index, int(term), isLeader
 	}
 
-	// r.lastLogIndex++
-	// index = r.lastLogIndex
+	index = r.log.lastLogIndex() + 1
+	r.log.append(index, Entry{Term: term, Index: index, Command: command})
+	// r.broadcastAppendEntries()
 
-	// go func() {
-	// 	select {
-	// 	case r.msgHandlerCh <- serviceMsgHandler{
-	// 		msg:     &ApplyMsg{Command: command, CommandIndex: index},
-	// 		handler: r,
-	// 	}:
-	// 	case <-r.done:
-	// 	}
-	// }()
-
-	return index, term, isLeader
+	return index, int(term), isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -603,9 +560,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartbeatTimeout: 1,
 		electionTimeout:  10,
 		votedFor:         None,
-		lastLogIndex:     None,
-		commitIndex:      None,
-		lastApplied:      None,
+		log:              newLog(),
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
 		msgHandlerCh:     make(chan msgHandler),

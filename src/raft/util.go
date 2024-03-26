@@ -18,13 +18,9 @@ func (r *lockedRand) Intn(n int) int {
 	return v
 }
 
-var globalRand = &lockedRand{
-	rand: rand.New(rand.NewSource(time.Now().UnixNano())),
-}
+var globalRand = &lockedRand{rand: rand.New(rand.NewSource(time.Now().UnixNano()))}
 
-type msgHandler interface {
-	handle()
-}
+type msgHandler interface{ handle() }
 
 type rpcMsgHandler struct {
 	args    any
@@ -62,5 +58,9 @@ func (h rpcReplyMsgHandler) handle() {
 // 	}()
 // }
 
-// type tracker struct {
+// type progress struct {
+// 	match int
+// 	next  int
 // }
+
+// type tracker []progress
