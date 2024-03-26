@@ -4,55 +4,55 @@ package raft
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term         uint32
+	Term         int
 	CandidateId  int
 	LastLogIndex int
-	LastLogTerm  uint32
+	LastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        uint32
+	Term        int
 	VoteGranted bool
 }
 
 type Entry struct {
-	Term    uint32
+	Term    int
 	Index   int
 	Command any
 }
 
 type FastBackup struct {
-	XTerm  uint32
+	XTerm  int
 	XIndex int
 	XLen   int
 }
 
 type AppendEntriesArgs struct {
-	Term         uint32
+	Term         int
 	LeaderId     int
 	PrevLogIndex int
-	PrevLogTerm  uint32
+	PrevLogTerm  int
 	Entries      []Entry
 	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	Term       uint32
+	Term       int
 	Success    bool
 	FollowerId int
 	Backup     FastBackup
 }
 
 // type HeartbeatArgs struct {
-// 	Term         uint32
+// 	Term         int
 // 	LeaderId     int
 // 	LeaderCommit int
 // }
 
 // type HeartbeatReply struct {
-// 	Term    uint32
+// 	Term    int
 // 	Success bool
 // }

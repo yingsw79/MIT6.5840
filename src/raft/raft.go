@@ -19,8 +19,8 @@ package raft
 
 import (
 	"log"
+	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"6.5840/labrpc"
@@ -47,10 +47,8 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-const None int = -1
-
 const (
-	StateFollower uint32 = iota
+	StateFollower int = iota
 	StateCandidate
 	StateLeader
 )
@@ -61,12 +59,12 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	// dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state uint32
+	state int
 	votes int
 
 	electionElapsed  int
@@ -84,7 +82,7 @@ type Raft struct {
 	tick func()
 	step func(any)
 
-	currentTerm uint32
+	currentTerm int
 	votedFor    int
 
 	log *raftLog
@@ -93,14 +91,19 @@ type Raft struct {
 
 	nextIndex  []int
 	matchIndex []int
+
+	lastApplied int
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (r *Raft) GetState() (int, bool) {
 	// Your code here (2A).
-	term := int(atomic.LoadUint32(&r.currentTerm))
-	isLeader := atomic.LoadUint32(&r.state) == StateLeader
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	term := r.currentTerm
+	isLeader := r.state == StateLeader
 	return term, isLeader
 }
 
@@ -188,6 +191,7 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		handler: r.handleRequestVote,
 		done:    make(chan struct{}),
 	}
+
 	select {
 	case r.msgHandlerCh <- msg:
 	case <-r.done:
@@ -286,6 +290,7 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 		handler: r.handleAppendEntries,
 		done:    make(chan struct{}),
 	}
+
 	select {
 	case r.msgHandlerCh <- msg:
 	case <-r.done:
@@ -297,38 +302,36 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 }
 
-func (r *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	return r.peers[server].Call("Raft.AppendEntries", args, reply)
-}
-
-func (r *Raft) broadcastAppendEntries() {
+func (r *Raft) sendAppendEntries(to int) {
 	args := &AppendEntriesArgs{
 		Term:         r.currentTerm,
 		LeaderId:     r.leaderId,
 		LeaderCommit: r.log.commitIndex,
+		PrevLogIndex: r.nextIndex[to] - 1,
+		PrevLogTerm:  r.log.term(r.nextIndex[to] - 1),
+		Entries:      r.log.rslice(r.nextIndex[to]),
 	}
+	reply := &AppendEntriesReply{}
 
-	for i := range r.peers {
-		if i == r.me {
-			continue
-		}
-
-		go func() {
-			args.PrevLogIndex = r.nextIndex[i] - 1
-			args.PrevLogTerm = r.log.term(r.nextIndex[i] - 1)
-			args.Entries = r.log.rslice(r.nextIndex[i])
-			reply := &AppendEntriesReply{}
-			if r.sendAppendEntries(i, args, reply) {
-				select {
-				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-				case <-r.done:
-				}
+	go func() {
+		if r.peers[to].Call("Raft.AppendEntries", args, reply) {
+			select {
+			case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
+			case <-r.done:
 			}
-		}()
+		}
+	}()
+}
+
+func (r *Raft) broadcastAppendEntries() {
+	for i := range r.peers {
+		if i != r.me {
+			r.sendAppendEntries(i)
+		}
 	}
 }
 
-func (r *Raft) becomeFollower(term uint32, LeaderId int) {
+func (r *Raft) becomeFollower(term int, LeaderId int) {
 	r.reset(term)
 	r.state = StateFollower
 	r.leaderId = LeaderId
@@ -361,6 +364,7 @@ func (r *Raft) becomeLeader() {
 	r.leaderId = r.me
 	r.tick = r.tickHeartbeat
 	r.step = r.stepLeader
+	r.log.append(Entry{Term: r.currentTerm, Index: r.log.lastLogIndex() + 1})
 
 	for i := range r.peers {
 		r.matchIndex[i] = 0
@@ -369,7 +373,7 @@ func (r *Raft) becomeLeader() {
 	log.Printf("%d became leader at term %d", r.me, r.currentTerm)
 }
 
-func (r *Raft) reset(term uint32) {
+func (r *Raft) reset(term int) {
 	if r.currentTerm != term {
 		r.currentTerm = term
 		r.votedFor = None
@@ -419,18 +423,19 @@ func (r *Raft) stepCandidate(msg any) {
 func (r *Raft) stepLeader(msg any) {
 	switch msg := msg.(type) {
 	case *AppendEntriesReply:
+
 		if msg.Term > r.currentTerm {
 			r.becomeFollower(msg.Term, None)
 		}
 		// TODO
+		if r.maybeCommit() {
+			r.broadcastAppendEntries()
+		}
+
 	case *RequestVoteReply:
 		if msg.Term > r.currentTerm {
 			r.becomeFollower(msg.Term, None)
 		}
-	case *ApplyMsg:
-		index = r.log.lastLogIndex() + 1
-		r.log.append(index, Entry{Term: term, Index: index, Command: command})
-		r.broadcastAppendEntries()
 	}
 }
 
@@ -451,29 +456,15 @@ func (r *Raft) tickHeartbeat() {
 	}
 }
 
-// func (r *Raft) broadcastHeartbeat() {
-// 	args := &AppendEntriesArgs{
-// 		Term:         r.currentTerm,
-// 		LeaderId:     r.leaderId,
-// 		LeaderCommit: r.commitIndex,
-// 	}
+func (r *Raft) followerCommitIndex() int {
+	m := slices.Clone(r.matchIndex)
+	slices.Sort(m)
+	return m[len(r.peers)/2]
+}
 
-// 	for i := range r.peers {
-// 		if i == r.me {
-// 			continue
-// 		}
-
-// 		go func() {
-// 			reply := &AppendEntriesReply{}
-// 			if r.sendAppendEntries(i, args, reply) {
-// 				select {
-// 				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-// 				case <-r.done:
-// 				}
-// 			}
-// 		}()
-// 	}
-// }
+func (r *Raft) maybeCommit() bool {
+	return r.log.commitTo(r.followerCommitIndex())
+}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -489,19 +480,20 @@ func (r *Raft) tickHeartbeat() {
 // the leader.
 func (r *Raft) Start(command any) (int, int, bool) {
 	// Your code here (2B).
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	index := -1
-	term := atomic.LoadUint32(&r.currentTerm)
-	isLeader := atomic.LoadUint32(&r.state) == StateLeader
+	index := None
+	term := r.currentTerm
+	isLeader := r.state == StateLeader
 	if !isLeader {
-		return index, int(term), isLeader
+		return index, term, isLeader
 	}
 
-	index = r.log.lastLogIndex() + 1
-	r.log.append(index, Entry{Term: term, Index: index, Command: command})
-	// r.broadcastAppendEntries()
+	r.log.append(Entry{Term: term, Index: r.log.lastLogIndex() + 1, Command: command})
+	r.broadcastAppendEntries()
 
-	return index, int(term), isLeader
+	return index, term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -514,7 +506,7 @@ func (r *Raft) Start(command any) (int, int, bool) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (r *Raft) Kill() {
-	atomic.StoreInt32(&r.dead, 1)
+	// atomic.StoreInt32(&r.dead, 1)
 	// Your code here, if desired.
 	close(r.done)
 }
@@ -531,9 +523,13 @@ func (r *Raft) ticker() {
 	for {
 		select {
 		case <-tk.C:
+			r.mu.Lock()
 			r.tick()
+			r.mu.Unlock()
 		case h := <-r.msgHandlerCh:
+			r.mu.Lock()
 			h.handle()
+			r.mu.Unlock()
 		case <-r.done:
 			return
 		}

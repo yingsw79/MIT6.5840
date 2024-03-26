@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const None int = -1
+
 type lockedRand struct {
 	mu   sync.Mutex
 	rand *rand.Rand
