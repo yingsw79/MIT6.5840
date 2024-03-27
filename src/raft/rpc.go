@@ -40,10 +40,11 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term       int
-	Success    bool
-	FollowerId int
-	Backup     FastBackup
+	Term           int
+	Success        bool
+	FollowerId     int
+	LastMatchIndex int
+	Backup         FastBackup
 }
 
 // type HeartbeatArgs struct {

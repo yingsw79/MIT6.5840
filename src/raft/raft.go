@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"log"
 	"slices"
 	"sync"
 	"time"
@@ -75,7 +74,6 @@ type Raft struct {
 	electionTimeout           int
 	randomizedElectionTimeout int
 
-	applyCh      chan ApplyMsg
 	msgHandlerCh chan msgHandler
 	done         chan struct{}
 
@@ -91,8 +89,6 @@ type Raft struct {
 
 	nextIndex  []int
 	matchIndex []int
-
-	lastApplied int
 }
 
 // return currentTerm and whether this server
@@ -273,14 +269,15 @@ func (r *Raft) handleAppendEntries(_args any, _reply any) {
 	r.becomeFollower(args.Term, args.LeaderId)
 	reply.Term = r.currentTerm
 
-	backup := r.log.maybeAppend(args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit, args.Entries)
-	if backup != nil {
+	lastMatchIndex, ok := r.log.maybeAppend(args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit, args.Entries)
+	if !ok {
 		reply.Success = false
-		reply.Backup = *backup
+		reply.Backup = r.log.findConflictBackup(args.PrevLogIndex)
 		return
 	}
 
 	reply.Success = true
+	reply.LastMatchIndex = lastMatchIndex
 }
 
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -337,7 +334,7 @@ func (r *Raft) becomeFollower(term int, LeaderId int) {
 	r.leaderId = LeaderId
 	r.tick = r.tickElection
 	r.step = r.stepFollower
-	log.Printf("%d became follower at term %d", r.me, r.currentTerm)
+	// log.Printf("%d became follower at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) becomeCandidate() {
@@ -351,7 +348,7 @@ func (r *Raft) becomeCandidate() {
 	r.votes++
 	r.tick = r.tickElection
 	r.step = r.stepCandidate
-	log.Printf("%d became candidate at term %d", r.me, r.currentTerm)
+	// log.Printf("%d became candidate at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) becomeLeader() {
@@ -364,13 +361,14 @@ func (r *Raft) becomeLeader() {
 	r.leaderId = r.me
 	r.tick = r.tickHeartbeat
 	r.step = r.stepLeader
-	r.log.append(Entry{Term: r.currentTerm, Index: r.log.lastLogIndex() + 1})
+	// r.log.append(Entry{Term: r.currentTerm, Index: r.log.lastLogIndex() + 1})
+	r.log.isLeader = true
 
 	for i := range r.peers {
 		r.matchIndex[i] = 0
 		r.nextIndex[i] = r.log.lastLogIndex() + 1
 	}
-	log.Printf("%d became leader at term %d", r.me, r.currentTerm)
+	// log.Printf("%d became leader at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) reset(term int) {
@@ -384,6 +382,7 @@ func (r *Raft) reset(term int) {
 	r.heartbeatElapsed = 0
 	r.electionElapsed = 0
 	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
+	r.log.reset(term)
 }
 
 func (r *Raft) stepFollower(msg any) {
@@ -423,13 +422,30 @@ func (r *Raft) stepCandidate(msg any) {
 func (r *Raft) stepLeader(msg any) {
 	switch msg := msg.(type) {
 	case *AppendEntriesReply:
-
-		if msg.Term > r.currentTerm {
+		if msg.Term < r.currentTerm {
+			return
+		} else if msg.Term > r.currentTerm {
 			r.becomeFollower(msg.Term, None)
-		}
-		// TODO
-		if r.maybeCommit() {
-			r.broadcastAppendEntries()
+		} else if msg.Success {
+			matchIndex := &r.matchIndex[msg.FollowerId]
+			*matchIndex = max(*matchIndex, msg.LastMatchIndex)
+			r.nextIndex[msg.FollowerId] = *matchIndex + 1
+
+			if r.maybeCommit() {
+				r.broadcastAppendEntries()
+				r.log.apply()
+			}
+		} else {
+			if backup := msg.Backup; backup.XTerm != None {
+				r.nextIndex[msg.FollowerId] = backup.XIndex
+				if r.log.match(backup.XTerm, backup.XIndex) {
+					r.nextIndex[msg.FollowerId]++
+				}
+			} else {
+				r.nextIndex[msg.FollowerId] = max(r.nextIndex[msg.FollowerId]-backup.XLen, 1)
+			}
+
+			r.sendAppendEntries(msg.FollowerId)
 		}
 
 	case *RequestVoteReply:
@@ -462,9 +478,7 @@ func (r *Raft) followerCommitIndex() int {
 	return m[len(r.peers)/2]
 }
 
-func (r *Raft) maybeCommit() bool {
-	return r.log.commitTo(r.followerCommitIndex())
-}
+func (r *Raft) maybeCommit() bool { return r.log.commitTo(r.followerCommitIndex()) }
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -490,6 +504,7 @@ func (r *Raft) Start(command any) (int, int, bool) {
 		return index, term, isLeader
 	}
 
+	index = r.log.lastLogIndex() + 1
 	r.log.append(Entry{Term: term, Index: r.log.lastLogIndex() + 1, Command: command})
 	r.broadcastAppendEntries()
 
@@ -551,12 +566,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		peers:            peers,
 		persister:        persister,
 		me:               me,
-		applyCh:          applyCh,
 		tickInterval:     50 * time.Millisecond,
 		heartbeatTimeout: 1,
 		electionTimeout:  10,
 		votedFor:         None,
-		log:              newLog(),
+		log:              newLog(applyCh),
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
 		msgHandlerCh:     make(chan msgHandler),

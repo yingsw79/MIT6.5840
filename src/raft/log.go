@@ -3,26 +3,24 @@ package raft
 type raftLog struct {
 	log         []Entry
 	commitIndex int
+	lastApplied int
+	applyCh     chan ApplyMsg
+	isLeader    bool
+	currentTerm int
 }
 
-func newLog() *raftLog {
-	return &raftLog{log: []Entry{{}}}
+func newLog(applyCh chan ApplyMsg) *raftLog {
+	return &raftLog{log: []Entry{{}}, applyCh: applyCh}
 }
 
-func (l *raftLog) lastLogIndex() int {
-	return len(l.log) - 1
-}
+func (l *raftLog) lastLogIndex() int    { return len(l.log) - 1 }
+func (l *raftLog) lastLogTerm() int     { return l.log[len(l.log)-1].Term }
+func (l *raftLog) term(i int) int       { return l.log[i].Term }
+func (l *raftLog) rslice(i int) []Entry { return l.log[i:] }
 
-func (l *raftLog) lastLogTerm() int {
-	return l.log[len(l.log)-1].Term
-}
-
-func (l *raftLog) term(i int) int {
-	return l.log[i].Term
-}
-
-func (l *raftLog) rslice(i int) []Entry {
-	return l.log[i:]
+func (l *raftLog) reset(term int) {
+	l.isLeader = false
+	l.currentTerm = term
 }
 
 func (l *raftLog) commitTo(i int) bool {
@@ -30,29 +28,51 @@ func (l *raftLog) commitTo(i int) bool {
 		l.commitIndex = i
 		return true
 	}
+
 	return false
+}
+
+func (l *raftLog) apply() {
+	for ; l.lastApplied < l.commitIndex; l.lastApplied++ {
+		e := l.log[l.lastApplied]
+		if e.Command == nil {
+			continue
+		}
+		// apply command
+		if l.isLeader && e.Term == l.currentTerm {
+			go func() {
+				l.applyCh <- ApplyMsg{
+					CommandValid: true,
+					Command:      e.Command,
+					CommandIndex: e.Index,
+				}
+			}()
+		}
+	}
 }
 
 func (l *raftLog) isUpToDate(term int, index int) bool {
 	return term > l.lastLogTerm() || (term == l.lastLogTerm() && index >= l.lastLogIndex())
 }
 
-func (l *raftLog) append(entries ...Entry) {
-	l.log = append(l.log, entries...)
+func (l *raftLog) append(entries ...Entry) { l.log = append(l.log, entries...) }
+
+func (l *raftLog) match(term int, index int) bool {
+	if index > l.lastLogIndex() {
+		return false
+	}
+
+	return l.term(index) == term
 }
 
-func (l *raftLog) findConflict(term int, index int) *FastBackup {
-	backup := &FastBackup{None, None, None}
+func (l *raftLog) findConflictBackup(index int) FastBackup {
+	backup := FastBackup{None, None, None}
 	if index > l.lastLogIndex() {
 		backup.XLen = index - l.lastLogIndex()
 		return backup
 	}
 
 	t := l.log[index].Term
-	if t == term {
-		return nil
-	}
-
 	backup.XTerm = t
 	for ; index >= 0 && l.log[index].Term == t; index-- {
 	}
@@ -61,13 +81,29 @@ func (l *raftLog) findConflict(term int, index int) *FastBackup {
 	return backup
 }
 
-func (l *raftLog) maybeAppend(term int, index int, committed int, entries []Entry) *FastBackup {
-	backup := l.findConflict(term, index)
-	if backup != nil {
-		return backup
+func (l *raftLog) findConflictIndex(entries []Entry) int {
+	for _, e := range entries {
+		if !l.match(e.Term, e.Index) {
+			return e.Index
+		}
 	}
-	l.log = append(l.log[:index+1], entries...) // TODO: Figure 8
-	l.commitTo(min(committed, l.lastLogIndex()))
 
-	return nil
+	return None
+}
+
+func (l *raftLog) maybeAppend(term int, index int, commit int, entries []Entry) (int, bool) {
+	if !l.match(term, index) {
+		return None, false
+	}
+
+	lastMatchIndex := index + len(entries)
+	i := l.findConflictIndex(entries)
+	if i != None {
+		l.log = append(l.log[:i], entries[i-index-1:]...)
+	}
+	if l.commitTo(min(commit, lastMatchIndex)) {
+		l.apply()
+	}
+
+	return lastMatchIndex, true
 }
