@@ -433,7 +433,8 @@ func (r *Raft) stepLeader(msg any) {
 
 			if r.maybeCommit() {
 				r.broadcastAppendEntries()
-				r.log.apply()
+
+				// r.log.apply(): error!
 			}
 		} else {
 			if backup := msg.Backup; backup.XTerm != None {
