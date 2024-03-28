@@ -18,10 +18,12 @@ package raft
 //
 
 import (
+	"bytes"
 	"slices"
 	"sync"
 	"time"
 
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -52,6 +54,12 @@ const (
 	StateLeader
 )
 
+type HardState struct {
+	CurrentTerm int
+	VotedFor    int
+	Log         []Entry
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -77,8 +85,8 @@ type Raft struct {
 	msgHandlerCh chan msgHandler
 	done         chan struct{}
 
-	tick func()
-	step func(any)
+	tickf func()
+	stepf func(any)
 
 	currentTerm int
 	votedFor    int
@@ -112,13 +120,12 @@ func (r *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (r *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	buf := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buf)
+	st := HardState{CurrentTerm: r.currentTerm, VotedFor: r.votedFor, Log: r.log.entries()}
+	enc.Encode(&st)
+	raftstate := buf.Bytes()
+	r.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -127,18 +134,12 @@ func (r *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	dec := labgob.NewDecoder(bytes.NewReader(data))
+	var st HardState
+	dec.Decode(&st)
+	r.currentTerm = st.CurrentTerm
+	r.votedFor = st.VotedFor
+	r.log.setEntries(st.Log)
 }
 
 // the service says it has created a snapshot that has
@@ -332,8 +333,8 @@ func (r *Raft) becomeFollower(term int, LeaderId int) {
 	r.reset(term)
 	r.state = StateFollower
 	r.leaderId = LeaderId
-	r.tick = r.tickElection
-	r.step = r.stepFollower
+	r.tickf = r.tickElection
+	r.stepf = r.stepFollower
 	// log.Printf("%d became follower at term %d", r.me, r.currentTerm)
 }
 
@@ -346,8 +347,8 @@ func (r *Raft) becomeCandidate() {
 	r.state = StateCandidate
 	r.votedFor = r.me
 	r.votes++
-	r.tick = r.tickElection
-	r.step = r.stepCandidate
+	r.tickf = r.tickElection
+	r.stepf = r.stepCandidate
 	// log.Printf("%d became candidate at term %d", r.me, r.currentTerm)
 }
 
@@ -359,9 +360,8 @@ func (r *Raft) becomeLeader() {
 	r.reset(r.currentTerm)
 	r.state = StateLeader
 	r.leaderId = r.me
-	r.tick = r.tickHeartbeat
-	r.step = r.stepLeader
-	// r.log.append(Entry{Term: r.currentTerm, Index: r.log.lastLogIndex() + 1})
+	r.tickf = r.tickHeartbeat
+	r.stepf = r.stepLeader
 
 	for i := range r.peers {
 		r.matchIndex[i] = 0
@@ -441,7 +441,7 @@ func (r *Raft) stepLeader(msg any) {
 					r.nextIndex[msg.FollowerId]++
 				}
 			} else {
-				r.nextIndex[msg.FollowerId] = max(r.nextIndex[msg.FollowerId]-backup.XLen, 1)
+				r.nextIndex[msg.FollowerId] = backup.XLen
 			}
 
 			r.sendAppendEntries(msg.FollowerId)
@@ -507,6 +507,7 @@ func (r *Raft) Start(command any) (int, int, bool) {
 	r.log.append(Entry{Term: term, Index: index, Command: command})
 	r.matchIndex[r.me]++
 	r.broadcastAppendEntries()
+	r.persist()
 
 	return index, term, isLeader
 }
@@ -523,13 +524,34 @@ func (r *Raft) Start(command any) (int, int, bool) {
 func (r *Raft) Kill() {
 	// atomic.StoreInt32(&r.dead, 1)
 	// Your code here, if desired.
-	close(r.done)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.kill()
 }
 
 // func (r *Raft) killed() bool {
 // 	z := atomic.LoadInt32(&r.dead)
 // 	return z == 1
 // }
+
+func (r *Raft) kill() { close(r.done) }
+
+func (r *Raft) tick() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.tickf()
+	r.persist()
+}
+
+func (r *Raft) handle(h msgHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	h.handle()
+	r.persist()
+}
 
 func (r *Raft) ticker() {
 	tk := time.NewTicker(r.tickInterval)
@@ -538,13 +560,9 @@ func (r *Raft) ticker() {
 	for {
 		select {
 		case <-tk.C:
-			r.mu.Lock()
 			r.tick()
-			r.mu.Unlock()
 		case h := <-r.msgHandlerCh:
-			r.mu.Lock()
-			h.handle()
-			r.mu.Unlock()
+			r.handle(h)
 		case <-r.done:
 			return
 		}

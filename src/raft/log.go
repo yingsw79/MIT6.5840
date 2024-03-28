@@ -11,10 +11,13 @@ func newLog(applyCh chan ApplyMsg) *raftLog {
 	return &raftLog{log: []Entry{{}}, applyCh: applyCh}
 }
 
-func (l *raftLog) lastLogIndex() int    { return len(l.log) - 1 }
-func (l *raftLog) lastLogTerm() int     { return l.log[len(l.log)-1].Term }
-func (l *raftLog) term(i int) int       { return l.log[i].Term }
-func (l *raftLog) rslice(i int) []Entry { return l.log[i:] }
+func (l *raftLog) lastLogIndex() int          { return len(l.log) - 1 }
+func (l *raftLog) len() int                   { return len(l.log) }
+func (l *raftLog) lastLogTerm() int           { return l.log[len(l.log)-1].Term }
+func (l *raftLog) term(i int) int             { return l.log[i].Term }
+func (l *raftLog) rslice(i int) []Entry       { return l.log[i:] }
+func (l *raftLog) entries() []Entry           { return l.log }
+func (l *raftLog) setEntries(entries []Entry) { l.log = entries }
 
 func (l *raftLog) commitTo(i int) bool {
 	if i > l.commitIndex && i <= l.lastLogIndex() {
@@ -57,7 +60,7 @@ func (l *raftLog) match(term int, index int) bool {
 func (l *raftLog) findConflictBackup(index int) FastBackup {
 	backup := FastBackup{None, None, None}
 	if index > l.lastLogIndex() {
-		backup.XLen = index - l.lastLogIndex()
+		backup.XLen = l.len()
 		return backup
 	}
 

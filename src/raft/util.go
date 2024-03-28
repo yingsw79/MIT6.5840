@@ -42,7 +42,7 @@ type rpcReplyMsgHandler struct {
 }
 
 func (h rpcReplyMsgHandler) handle() {
-	h.handler.step(h.reply)
+	h.handler.stepf(h.reply)
 }
 
 // type serviceMsgHandler struct {
