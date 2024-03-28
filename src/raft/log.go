@@ -5,8 +5,6 @@ type raftLog struct {
 	commitIndex int
 	lastApplied int
 	applyCh     chan ApplyMsg
-	isLeader    bool
-	currentTerm int
 }
 
 func newLog(applyCh chan ApplyMsg) *raftLog {
@@ -18,11 +16,6 @@ func (l *raftLog) lastLogTerm() int     { return l.log[len(l.log)-1].Term }
 func (l *raftLog) term(i int) int       { return l.log[i].Term }
 func (l *raftLog) rslice(i int) []Entry { return l.log[i:] }
 
-func (l *raftLog) reset(term int) {
-	l.isLeader = false
-	l.currentTerm = term
-}
-
 func (l *raftLog) commitTo(i int) bool {
 	if i > l.commitIndex && i <= l.lastLogIndex() {
 		l.commitIndex = i
@@ -33,20 +26,16 @@ func (l *raftLog) commitTo(i int) bool {
 }
 
 func (l *raftLog) apply() {
-	for ; l.lastApplied < l.commitIndex; l.lastApplied++ {
+	for ; l.lastApplied <= l.commitIndex; l.lastApplied++ {
 		e := l.log[l.lastApplied]
 		if e.Command == nil {
 			continue
 		}
-		// apply command
-		if l.isLeader && e.Term == l.currentTerm {
-			go func() {
-				l.applyCh <- ApplyMsg{
-					CommandValid: true,
-					Command:      e.Command,
-					CommandIndex: e.Index,
-				}
-			}()
+
+		l.applyCh <- ApplyMsg{
+			CommandValid: true,
+			Command:      e.Command,
+			CommandIndex: e.Index,
 		}
 	}
 }

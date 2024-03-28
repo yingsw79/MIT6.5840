@@ -362,12 +362,12 @@ func (r *Raft) becomeLeader() {
 	r.tick = r.tickHeartbeat
 	r.step = r.stepLeader
 	// r.log.append(Entry{Term: r.currentTerm, Index: r.log.lastLogIndex() + 1})
-	r.log.isLeader = true
 
 	for i := range r.peers {
 		r.matchIndex[i] = 0
 		r.nextIndex[i] = r.log.lastLogIndex() + 1
 	}
+	r.matchIndex[r.me] = r.log.lastLogIndex()
 	// log.Printf("%d became leader at term %d", r.me, r.currentTerm)
 }
 
@@ -382,7 +382,6 @@ func (r *Raft) reset(term int) {
 	r.heartbeatElapsed = 0
 	r.electionElapsed = 0
 	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
-	r.log.reset(term)
 }
 
 func (r *Raft) stepFollower(msg any) {
@@ -433,8 +432,7 @@ func (r *Raft) stepLeader(msg any) {
 
 			if r.maybeCommit() {
 				r.broadcastAppendEntries()
-
-				// r.log.apply(): error!
+				r.log.apply()
 			}
 		} else {
 			if backup := msg.Backup; backup.XTerm != None {
@@ -506,7 +504,8 @@ func (r *Raft) Start(command any) (int, int, bool) {
 	}
 
 	index = r.log.lastLogIndex() + 1
-	r.log.append(Entry{Term: term, Index: r.log.lastLogIndex() + 1, Command: command})
+	r.log.append(Entry{Term: term, Index: index, Command: command})
+	r.matchIndex[r.me]++
 	r.broadcastAppendEntries()
 
 	return index, term, isLeader
