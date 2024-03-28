@@ -1,5 +1,7 @@
 package raft
 
+import "slices"
+
 type raftLog struct {
 	log         []Entry
 	commitIndex int
@@ -15,9 +17,9 @@ func (l *raftLog) lastLogIndex() int          { return len(l.log) - 1 }
 func (l *raftLog) len() int                   { return len(l.log) }
 func (l *raftLog) lastLogTerm() int           { return l.log[len(l.log)-1].Term }
 func (l *raftLog) term(i int) int             { return l.log[i].Term }
-func (l *raftLog) rslice(i int) []Entry       { return l.log[i:] }
-func (l *raftLog) entries() []Entry           { return l.log }
-func (l *raftLog) setEntries(entries []Entry) { l.log = entries }
+func (l *raftLog) rslice(i int) []Entry       { return slices.Clone(l.log[i:]) }
+func (l *raftLog) entries() []Entry           { return slices.Clone(l.log) }
+func (l *raftLog) setEntries(entries []Entry) { l.log = slices.Clone(entries) }
 
 func (l *raftLog) commitTo(i int) bool {
 	if i > l.commitIndex && i <= l.lastLogIndex() {
