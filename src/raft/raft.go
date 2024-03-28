@@ -130,6 +130,9 @@ func (r *Raft) persist() {
 
 // restore previously persisted state.
 func (r *Raft) readPersist(data []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
