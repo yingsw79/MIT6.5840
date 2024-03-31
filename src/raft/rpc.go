@@ -47,13 +47,18 @@ type AppendEntriesReply struct {
 	Backup         FastBackup
 }
 
-// type HeartbeatArgs struct {
-// 	Term         int
-// 	LeaderId     int
-// 	LeaderCommit int
-// }
+type Snapshot struct {
+	Index int
+	Term  int
+	Data  []byte
+}
 
-// type HeartbeatReply struct {
-// 	Term    int
-// 	Success bool
-// }
+type InstallSnapshotArgs struct {
+	Term     int
+	LeaderId int
+	Snapshot Snapshot
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}

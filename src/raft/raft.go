@@ -122,7 +122,7 @@ func (r *Raft) persist() {
 	// Your code here (2C).
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
-	st := HardState{CurrentTerm: r.currentTerm, VotedFor: r.votedFor, Log: r.log.entries()}
+	st := HardState{CurrentTerm: r.currentTerm, VotedFor: r.votedFor, Log: r.log.allEntries()}
 	enc.Encode(&st)
 	raftstate := buf.Bytes()
 	r.persister.Save(raftstate, nil)
@@ -142,7 +142,7 @@ func (r *Raft) readPersist(data []byte) {
 	dec.Decode(&st)
 	r.currentTerm = st.CurrentTerm
 	r.votedFor = st.VotedFor
-	r.log.setEntries(st.Log)
+	// r.log.setEntries(st.Log)
 }
 
 // the service says it has created a snapshot that has
@@ -310,7 +310,7 @@ func (r *Raft) sendAppendEntries(to int) {
 		LeaderCommit: r.log.commitIndex,
 		PrevLogIndex: r.nextIndex[to] - 1,
 		PrevLogTerm:  r.log.term(r.nextIndex[to] - 1),
-		Entries:      r.log.rslice(r.nextIndex[to]),
+		Entries:      r.log.entries(r.nextIndex[to]),
 	}
 	reply := &AppendEntriesReply{}
 
