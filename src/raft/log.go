@@ -1,56 +1,18 @@
 package raft
 
-import "slices"
-
 type raftLog struct {
-	unstable    unstable
+	unstable
 	commitIndex int
 	lastApplied int
 	applyCh     chan ApplyMsg
 }
 
 func newLog(applyCh chan ApplyMsg) *raftLog {
-	return &raftLog{unstable: unstable{entries: []Entry{{}}}, applyCh: applyCh}
+	return &raftLog{unstable: unstable{ent: []Entry{{}}}, applyCh: applyCh}
 }
-
-func (l *raftLog) firstIndex() int {
-	i, _ := l.unstable.maybeFirstIndex()
-	return i
-}
-
-func (l *raftLog) lastLogIndex() int {
-	i, _ := l.unstable.maybeLastIndex()
-	return i
-}
-
-func (l *raftLog) len() int { return l.lastLogIndex() + 1 }
-
-func (l *raftLog) lastLogTerm() int {
-	t, _ := l.unstable.maybeTerm(l.lastLogIndex())
-	return t
-}
-
-func (l *raftLog) term(i int) int {
-	t, _ := l.unstable.maybeTerm(i)
-	return t
-}
-
-func (l *raftLog) stableTo(i, t int) { l.unstable.stableTo(i, t) } // TODO
-
-func (l *raftLog) stableSnapTo(i int) { l.unstable.stableSnapTo(i) }
-
-func (l *raftLog) slice(lo, hi int) []Entry {
-	return slices.Clone(l.unstable.slice(max(lo, l.unstable.offset), hi))
-}
-
-func (l *raftLog) entries(i int) []Entry { return l.slice(i, l.lastLogIndex()+1) }
-
-func (l *raftLog) allEntries() []Entry { return l.entries(l.firstIndex()) }
-
-// func (l *raftLog) setEntries(entries []Entry) { l.log = slices.Clone(entries) }
 
 func (l *raftLog) commitTo(i int) bool {
-	if i > l.commitIndex && i <= l.lastLogIndex() {
+	if i > l.commitIndex && i <= l.lastIndex() {
 		l.commitIndex = i
 		return true
 	}
@@ -58,9 +20,26 @@ func (l *raftLog) commitTo(i int) bool {
 	return false
 }
 
+func (l *raftLog) appliedTo(i int) {
+	if i > l.lastApplied && i <= l.commitIndex {
+		l.lastApplied = i
+	}
+}
+
 func (l *raftLog) apply() {
-	for ; l.lastApplied <= l.commitIndex; l.lastApplied++ {
-		e := l.log[l.lastApplied]
+	if l.hasPendingSnapshot() {
+		snapshot := l.snapshot()
+		l.applyCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      snapshot.Data,
+			SnapshotTerm:  snapshot.Term,
+			SnapshotIndex: snapshot.Index,
+		}
+		l.appliedTo(l.snapshotIndex())
+	}
+
+	ne := l.nextEntries()
+	for _, e := range ne {
 		if e.Command == nil {
 			continue
 		}
@@ -70,17 +49,28 @@ func (l *raftLog) apply() {
 			Command:      e.Command,
 			CommandIndex: e.Index,
 		}
+		l.appliedTo(e.Index)
 	}
 }
 
-func (l *raftLog) isUpToDate(term int, index int) bool {
-	return term > l.lastLogTerm() || (term == l.lastLogTerm() && index >= l.lastLogIndex())
+func (l *raftLog) nextEntries() []Entry {
+	i := max(l.lastApplied+1, l.firstIndex())
+	if l.commitIndex+1 > i {
+		return l.slice(i, l.commitIndex+1)
+	}
+	return nil
 }
 
-func (l *raftLog) append(entries ...Entry) { l.unstable.truncateAndAppend(entries) }
+func (l *raftLog) hasPendingSnapshot() bool {
+	return l.hasSnapshot() && l.lastApplied < l.snapshotIndex()
+}
+
+func (l *raftLog) isUpToDate(term int, index int) bool {
+	return term > l.lastTerm() || (term == l.lastTerm() && index >= l.lastIndex())
+}
 
 func (l *raftLog) match(term int, index int) bool {
-	if index > l.lastLogIndex() {
+	if index > l.lastIndex() {
 		return false
 	}
 
@@ -89,8 +79,8 @@ func (l *raftLog) match(term int, index int) bool {
 
 func (l *raftLog) findConflictBackup(index int) FastBackup {
 	backup := FastBackup{None, None, None}
-	if index > l.lastLogIndex() {
-		backup.XLen = l.len()
+	if index > l.lastIndex() {
+		backup.XLen = l.lastIndex() + 1
 		return backup
 	}
 

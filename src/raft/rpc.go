@@ -61,4 +61,7 @@ type InstallSnapshotArgs struct {
 
 type InstallSnapshotReply struct {
 	Term int
+	// Success        bool
+	// FollowerId     int
+	// LastMatchIndex int
 }

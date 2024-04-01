@@ -66,7 +66,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
-	// dead      int32               // set by Kill()
+	dead      bool                // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -120,12 +120,22 @@ func (r *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (r *Raft) persist() {
 	// Your code here (2C).
+	r.persister.Save(r.encodedState(), r.encodedSnapshot())
+}
+
+func (r *Raft) encodedState() []byte {
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
-	st := HardState{CurrentTerm: r.currentTerm, VotedFor: r.votedFor, Log: r.log.allEntries()}
+	st := HardState{CurrentTerm: r.currentTerm, VotedFor: r.votedFor, Log: slices.Clone(r.log.entries())}
 	enc.Encode(&st)
-	raftstate := buf.Bytes()
-	r.persister.Save(raftstate, nil)
+	return buf.Bytes()
+}
+
+func (r *Raft) encodedSnapshot() []byte {
+	buf := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buf)
+	enc.Encode(r.log.snapshot())
+	return buf.Bytes()
 }
 
 // restore previously persisted state.
@@ -145,13 +155,26 @@ func (r *Raft) readPersist(data []byte) {
 	// r.log.setEntries(st.Log)
 }
 
+func (r *Raft) loadState() {
+
+}
+
+func (r *Raft) loadSnapshot() {
+
+}
+
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (r *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
+	s := Snapshot{Index: index, Term: r.log.term(index), Data: snapshot}
+	r.log.stableTo(s)
+	r.persist()
 }
 
 func (r *Raft) handleRequestVote(_args any, _reply any) {
@@ -185,22 +208,7 @@ func (r *Raft) handleRequestVote(_args any, _reply any) {
 // example RequestVote RPC handler.
 func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	msg := rpcMsgHandler{
-		args:    args,
-		reply:   reply,
-		handler: r.handleRequestVote,
-		done:    make(chan struct{}),
-	}
-
-	select {
-	case r.msgHandlerCh <- msg:
-	case <-r.done:
-		return
-	}
-	select {
-	case <-msg.done:
-	case <-r.done:
-	}
+	r.rpc(args, reply, r.handleRequestVote)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -238,8 +246,8 @@ func (r *Raft) broadcastRequestVote() {
 	args := &RequestVoteArgs{
 		Term:         r.currentTerm,
 		CandidateId:  r.me,
-		LastLogTerm:  r.log.lastLogTerm(),
-		LastLogIndex: r.log.lastLogIndex(),
+		LastLogTerm:  r.log.lastTerm(),
+		LastLogIndex: r.log.lastIndex(),
 	}
 
 	for i := range r.peers {
@@ -285,22 +293,7 @@ func (r *Raft) handleAppendEntries(_args any, _reply any) {
 }
 
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	msg := rpcMsgHandler{
-		args:    args,
-		reply:   reply,
-		handler: r.handleAppendEntries,
-		done:    make(chan struct{}),
-	}
-
-	select {
-	case r.msgHandlerCh <- msg:
-	case <-r.done:
-		return
-	}
-	select {
-	case <-msg.done:
-	case <-r.done:
-	}
+	r.rpc(args, reply, r.handleAppendEntries)
 }
 
 func (r *Raft) sendAppendEntries(to int) {
@@ -310,7 +303,7 @@ func (r *Raft) sendAppendEntries(to int) {
 		LeaderCommit: r.log.commitIndex,
 		PrevLogIndex: r.nextIndex[to] - 1,
 		PrevLogTerm:  r.log.term(r.nextIndex[to] - 1),
-		Entries:      r.log.entries(r.nextIndex[to]),
+		Entries:      slices.Clone(r.log.entriesFrom(r.nextIndex[to])),
 	}
 	reply := &AppendEntriesReply{}
 
@@ -329,6 +322,62 @@ func (r *Raft) broadcastAppendEntries() {
 		if i != r.me {
 			r.sendAppendEntries(i)
 		}
+	}
+}
+
+func (r *Raft) handleInstallSnapshot(_args any, _reply any) {
+	args := _args.(*InstallSnapshotArgs)
+	reply := _reply.(*InstallSnapshotReply)
+
+	if args.Term < r.currentTerm {
+		reply.Term = r.currentTerm
+		return
+	}
+
+	r.becomeFollower(args.Term, args.LeaderId)
+	reply.Term = r.currentTerm
+
+	r.log.stableTo(args.Snapshot)
+}
+
+func (r *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	r.rpc(args, reply, r.handleInstallSnapshot)
+}
+
+func (r *Raft) sendInstallSnapshot(to int) {
+	args := &InstallSnapshotArgs{
+		Term:     r.currentTerm,
+		LeaderId: r.leaderId,
+		Snapshot: r.log.snapshot(),
+	}
+	reply := &InstallSnapshotReply{}
+
+	go func() {
+		if r.peers[to].Call("Raft.InstallSnapshot", args, reply) {
+			select {
+			case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
+			case <-r.done:
+			}
+		}
+	}()
+}
+
+func (r *Raft) rpc(args, reply any, handler func(any, any)) {
+	msg := rpcMsgHandler{
+		args:    args,
+		reply:   reply,
+		handler: handler,
+		done:    make(chan struct{}),
+	}
+
+	select {
+	case r.msgHandlerCh <- msg:
+	case <-r.done:
+		return
+	}
+	select {
+	case <-msg.done:
+	case <-r.done:
 	}
 }
 
@@ -368,9 +417,9 @@ func (r *Raft) becomeLeader() {
 
 	for i := range r.peers {
 		r.matchIndex[i] = 0
-		r.nextIndex[i] = r.log.lastLogIndex() + 1
+		r.nextIndex[i] = r.log.lastIndex() + 1
 	}
-	r.matchIndex[r.me] = r.log.lastLogIndex()
+	r.matchIndex[r.me] = r.log.lastIndex()
 	// log.Printf("%d became leader at term %d", r.me, r.currentTerm)
 }
 
@@ -397,6 +446,10 @@ func (r *Raft) stepFollower(msg any) {
 		if msg.Term > r.currentTerm {
 			r.becomeFollower(msg.Term, None)
 		}
+	case *InstallSnapshotReply:
+		if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
+		}
 	}
 }
 
@@ -418,6 +471,10 @@ func (r *Raft) stepCandidate(msg any) {
 				r.broadcastAppendEntries()
 			}
 		}
+	case *InstallSnapshotReply:
+		if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
+		}
 	}
 }
 
@@ -438,19 +495,28 @@ func (r *Raft) stepLeader(msg any) {
 				r.log.apply()
 			}
 		} else {
+			nextIndex := &r.nextIndex[msg.FollowerId]
 			if backup := msg.Backup; backup.XTerm != None {
-				r.nextIndex[msg.FollowerId] = backup.XIndex
+				*nextIndex = backup.XIndex
 				if r.log.match(backup.XTerm, backup.XIndex) {
-					r.nextIndex[msg.FollowerId]++
+					*nextIndex++
 				}
 			} else {
-				r.nextIndex[msg.FollowerId] = backup.XLen
+				*nextIndex = backup.XLen
 			}
 
-			r.sendAppendEntries(msg.FollowerId)
+			if r.log.hasSnapshot() && r.log.snapshotIndex() >= *nextIndex {
+				r.sendInstallSnapshot(msg.FollowerId)
+			} else {
+				r.sendAppendEntries(msg.FollowerId)
+			}
 		}
 
 	case *RequestVoteReply:
+		if msg.Term > r.currentTerm {
+			r.becomeFollower(msg.Term, None)
+		}
+	case *InstallSnapshotReply:
 		if msg.Term > r.currentTerm {
 			r.becomeFollower(msg.Term, None)
 		}
@@ -506,7 +572,7 @@ func (r *Raft) Start(command any) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	index = r.log.lastLogIndex() + 1
+	index = r.log.lastIndex() + 1
 	r.log.append(Entry{Term: term, Index: index, Command: command})
 	r.matchIndex[r.me]++
 	r.broadcastAppendEntries()
@@ -525,25 +591,29 @@ func (r *Raft) Start(command any) (int, int, bool) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (r *Raft) Kill() {
-	// atomic.StoreInt32(&r.dead, 1)
-	// Your code here, if desired.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.killed() {
+		return
+	}
 	r.kill()
 }
 
-// func (r *Raft) killed() bool {
-// 	z := atomic.LoadInt32(&r.dead)
-// 	return z == 1
-// }
+func (r *Raft) kill() {
+	close(r.done)
+	r.dead = true
+}
 
-func (r *Raft) kill() { close(r.done) }
+func (r *Raft) killed() bool { return r.dead }
 
 func (r *Raft) tick() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.killed() {
+		return
+	}
 	r.tickf()
 	r.persist()
 }
@@ -552,6 +622,9 @@ func (r *Raft) handle(h msgHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.killed() {
+		return
+	}
 	h.handle()
 	r.persist()
 }
