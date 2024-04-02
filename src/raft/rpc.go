@@ -47,10 +47,14 @@ type AppendEntriesReply struct {
 	Backup         FastBackup
 }
 
-type Snapshot struct {
+type SnapshotMetadata struct {
 	Index int
 	Term  int
-	Data  []byte
+}
+
+type Snapshot struct {
+	Metadata SnapshotMetadata
+	Data     []byte
 }
 
 type InstallSnapshotArgs struct {
@@ -60,8 +64,8 @@ type InstallSnapshotArgs struct {
 }
 
 type InstallSnapshotReply struct {
-	Term int
-	// Success        bool
-	// FollowerId     int
-	// LastMatchIndex int
+	Term           int
+	Success        bool
+	FollowerId     int
+	LastMatchIndex int
 }

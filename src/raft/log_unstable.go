@@ -17,7 +17,7 @@ func (u *unstable) hasSnapshot() bool { return u.snap != nil }
 
 func (u *unstable) snapshot() Snapshot { return *u.snap }
 
-func (u *unstable) snapshotIndex() int { return u.snap.Index }
+func (u *unstable) snapshotIndex() int { return u.snap.Metadata.Index }
 
 func (u *unstable) lastIndex() int {
 	if l := len(u.ent); l != 0 {
@@ -34,7 +34,7 @@ func (u *unstable) lastTerm() int { return u.term(u.lastIndex()) }
 func (u *unstable) term(i int) int {
 	if i < u.offset {
 		if u.hasSnapshot() && u.snapshotIndex() == i {
-			return u.snap.Term
+			return u.snap.Metadata.Term
 		}
 		return 0
 	}
@@ -47,15 +47,30 @@ func (u *unstable) term(i int) int {
 }
 
 func (u *unstable) stableTo(s Snapshot) {
-	if s.Term == u.term(s.Index) && s.Index >= u.offset && s.Index <= u.lastIndex() {
-		u.ent = u.entriesFrom(s.Index + 1)
-		u.offset = s.Index + 1
+	if s.Metadata.Index < u.offset {
+		return
+	}
+
+	if s.Metadata.Index < u.lastIndex() {
+		u.ent = u.entriesFrom(s.Metadata.Index + 1)
+		u.offset = s.Metadata.Index + 1
 		u.shrinkEntries()
 		u.snap = &s
-	} else if s.Index > u.lastIndex() {
-		u.restore(s)
+	} else {
+		u.restoreSnapshot(s)
 	}
 }
+
+// func (u *unstable) stableTo(s Snapshot) { // TODO
+// 	if s.Term == u.term(s.Index) && s.Index >= u.offset && s.Index <= u.lastIndex() {
+// 		u.ent = u.entriesFrom(s.Index + 1)
+// 		u.offset = s.Index + 1
+// 		u.shrinkEntries()
+// 		u.snap = &s
+// 	} else if s.Index > u.lastIndex() {
+// 		u.restoreSnapshot(s)
+// 	}
+// }
 
 func (u *unstable) shrinkEntries() {
 	if len(u.ent)*2 < cap(u.ent) {
@@ -63,8 +78,10 @@ func (u *unstable) shrinkEntries() {
 	}
 }
 
-func (u *unstable) restore(s Snapshot) {
-	u.offset = s.Index + 1
+func (u *unstable) restoreEntries(entries []Entry) { u.ent = entries }
+
+func (u *unstable) restoreSnapshot(s Snapshot) {
+	u.offset = s.Metadata.Index + 1
 	u.ent = []Entry{}
 	u.snap = &s
 }
@@ -76,7 +93,7 @@ func (u *unstable) append(entries ...Entry) {
 		// after is the next index in the u.entries
 		// directly append
 		u.ent = append(u.ent, entries...)
-	case after <= u.offset:
+	case after <= u.offset: // TODO
 		log.Printf("replace the unstable entries from index %d", after)
 		// The log is being truncated to before our current offset
 		// portion, so set the offset and replace the entries
@@ -96,7 +113,9 @@ func (u *unstable) slice(lo int, hi int) []Entry {
 	return u.ent[lo-u.offset : hi-u.offset]
 }
 
-func (u *unstable) entriesFrom(i int) []Entry { return u.slice(i, u.lastIndex()+1) }
+func (u *unstable) entriesFrom(i int) []Entry {
+	return u.slice(max(i, u.firstIndex()), u.lastIndex()+1)
+}
 
 func (u *unstable) entries() []Entry { return u.entriesFrom(u.firstIndex()) }
 

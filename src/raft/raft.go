@@ -57,7 +57,8 @@ const (
 type HardState struct {
 	CurrentTerm int
 	VotedFor    int
-	Log         []Entry
+	// SnapMetadata SnapshotMetadata
+	Log []Entry
 }
 
 // A Go object implementing a single Raft peer.
@@ -71,32 +72,32 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state int
-	votes int
+	state       int
+	votes       int
+	currentTerm int
+	votedFor    int
+	leaderId    int
 
-	electionElapsed  int
-	heartbeatElapsed int
+	tickInterval time.Duration
 
-	tickInterval              time.Duration
+	heartbeatElapsed          int
+	electionElapsed           int
 	heartbeatTimeout          int
 	electionTimeout           int
 	randomizedElectionTimeout int
 
-	msgHandlerCh chan msgHandler
-	done         chan struct{}
-
 	tickf func()
 	stepf func(any)
 
-	currentTerm int
-	votedFor    int
-
 	log *raftLog
 
-	leaderId int
+	applyCh      chan ApplyMsg
+	msgHandlerCh chan msgHandler
 
 	nextIndex  []int
 	matchIndex []int
+
+	done chan struct{}
 }
 
 // return currentTerm and whether this server
@@ -120,47 +121,49 @@ func (r *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (r *Raft) persist() {
 	// Your code here (2C).
-	r.persister.Save(r.encodedState(), r.encodedSnapshot())
-}
-
-func (r *Raft) encodedState() []byte {
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
-	st := HardState{CurrentTerm: r.currentTerm, VotedFor: r.votedFor, Log: slices.Clone(r.log.entries())}
+	st := HardState{
+		CurrentTerm: r.currentTerm,
+		VotedFor:    r.votedFor,
+		// SnapMetadata: r.log.snapshot().Metadata,
+		Log: slices.Clone(r.log.entries()),
+	}
 	enc.Encode(&st)
-	return buf.Bytes()
-}
+	raftstate := buf.Bytes()
 
-func (r *Raft) encodedSnapshot() []byte {
-	buf := new(bytes.Buffer)
-	enc := labgob.NewEncoder(buf)
-	enc.Encode(r.log.snapshot())
-	return buf.Bytes()
+	var snapshot []byte
+	if r.log.hasSnapshot() {
+		buf := new(bytes.Buffer)
+		enc := labgob.NewEncoder(buf)
+		enc.Encode(r.log.snapshot())
+		snapshot = buf.Bytes()
+	}
+
+	r.persister.Save(raftstate, snapshot)
 }
 
 // restore previously persisted state.
-func (r *Raft) readPersist(data []byte) {
+func (r *Raft) readPersist() {
+	// Your code here (2C).
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
+	if data := r.persister.ReadSnapshot(); len(data) > 0 {
+		dec := labgob.NewDecoder(bytes.NewReader(data))
+		var snap Snapshot
+		dec.Decode(&snap)
+		r.log.restoreSnapshot(snap)
 	}
-	// Your code here (2C).
-	dec := labgob.NewDecoder(bytes.NewReader(data))
-	var st HardState
-	dec.Decode(&st)
-	r.currentTerm = st.CurrentTerm
-	r.votedFor = st.VotedFor
-	// r.log.setEntries(st.Log)
-}
 
-func (r *Raft) loadState() {
-
-}
-
-func (r *Raft) loadSnapshot() {
-
+	if data := r.persister.ReadRaftState(); len(data) > 0 {
+		dec := labgob.NewDecoder(bytes.NewReader(data))
+		var st HardState
+		dec.Decode(&st)
+		r.currentTerm = st.CurrentTerm
+		r.votedFor = st.VotedFor
+		r.log.restoreEntries(st.Log)
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -171,10 +174,18 @@ func (r *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// log.Printf("Snapshot: %d", index)
 
-	s := Snapshot{Index: index, Term: r.log.term(index), Data: snapshot}
+	s := Snapshot{
+		Metadata: SnapshotMetadata{Index: index, Term: r.log.term(index)},
+		Data:     snapshot,
+	}
 	r.log.stableTo(s)
+	// log.Printf("stableTo Snapshot: %d", index)
+
 	r.persist()
+	// log.Printf("persist Snapshot: %d", index)
+
 }
 
 func (r *Raft) handleRequestVote(_args any, _reply any) {
@@ -297,6 +308,11 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 }
 
 func (r *Raft) sendAppendEntries(to int) {
+	if r.log.hasSnapshot() && r.log.snapshotIndex() >= r.nextIndex[to] {
+		r.sendInstallSnapshot(to)
+		return
+	}
+
 	args := &AppendEntriesArgs{
 		Term:         r.currentTerm,
 		LeaderId:     r.leaderId,
@@ -331,13 +347,15 @@ func (r *Raft) handleInstallSnapshot(_args any, _reply any) {
 
 	if args.Term < r.currentTerm {
 		reply.Term = r.currentTerm
+		reply.Success = false
 		return
 	}
 
 	r.becomeFollower(args.Term, args.LeaderId)
-	reply.Term = r.currentTerm
-
 	r.log.stableTo(args.Snapshot)
+	reply.Term = r.currentTerm
+	reply.Success = true
+	reply.LastMatchIndex = args.Snapshot.Metadata.Index
 }
 
 func (r *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -486,41 +504,47 @@ func (r *Raft) stepLeader(msg any) {
 		} else if msg.Term > r.currentTerm {
 			r.becomeFollower(msg.Term, None)
 		} else if msg.Success {
-			matchIndex := &r.matchIndex[msg.FollowerId]
-			*matchIndex = max(*matchIndex, msg.LastMatchIndex)
-			r.nextIndex[msg.FollowerId] = *matchIndex + 1
-
-			if r.maybeCommit() {
-				r.broadcastAppendEntries()
-				r.log.apply()
-			}
+			r.updateTrack(msg.FollowerId, msg.LastMatchIndex)
 		} else {
-			nextIndex := &r.nextIndex[msg.FollowerId]
-			if backup := msg.Backup; backup.XTerm != None {
-				*nextIndex = backup.XIndex
-				if r.log.match(backup.XTerm, backup.XIndex) {
-					*nextIndex++
-				}
-			} else {
-				*nextIndex = backup.XLen
-			}
-
-			if r.log.hasSnapshot() && r.log.snapshotIndex() >= *nextIndex {
-				r.sendInstallSnapshot(msg.FollowerId)
-			} else {
-				r.sendAppendEntries(msg.FollowerId)
-			}
+			r.updateTrackWithBackup(msg.FollowerId, msg.Backup)
 		}
-
 	case *RequestVoteReply:
 		if msg.Term > r.currentTerm {
 			r.becomeFollower(msg.Term, None)
 		}
 	case *InstallSnapshotReply:
-		if msg.Term > r.currentTerm {
+		if msg.Term < r.currentTerm {
+			return
+		} else if msg.Term > r.currentTerm {
 			r.becomeFollower(msg.Term, None)
+		} else if msg.Success {
+			r.updateTrack(msg.FollowerId, msg.LastMatchIndex)
+		} else {
+			r.sendInstallSnapshot(msg.FollowerId)
 		}
 	}
+}
+
+func (r *Raft) updateTrack(i, matched int) {
+	r.matchIndex[i] = max(r.matchIndex[i], matched)
+	r.nextIndex[i] = r.matchIndex[i] + 1
+
+	if r.maybeCommit() {
+		r.broadcastAppendEntries()
+	}
+}
+
+func (r *Raft) updateTrackWithBackup(i int, backup FastBackup) {
+	if backup.XTerm != None {
+		r.nextIndex[i] = backup.XIndex
+		if r.log.match(backup.XTerm, backup.XIndex) {
+			r.nextIndex[i]++
+		}
+	} else {
+		r.nextIndex[i] = backup.XLen
+	}
+
+	r.sendAppendEntries(i)
 }
 
 func (r *Raft) tickElection() {
@@ -645,6 +669,58 @@ func (r *Raft) ticker() {
 	}
 }
 
+func (r *Raft) applier() {
+	for {
+		r.mu.Lock()
+		if r.killed() {
+			r.mu.Unlock()
+			return
+		}
+
+		if r.log.hasPendingSnapshot() {
+			snapshot := r.log.snapshot()
+			r.mu.Unlock()
+
+			select {
+			case r.applyCh <- ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      snapshot.Data,
+				SnapshotTerm:  snapshot.Metadata.Term,
+				SnapshotIndex: snapshot.Metadata.Index,
+			}:
+			case <-r.done:
+				return
+			}
+			r.log.appliedTo(r.log.snapshotIndex())
+		} else {
+			r.mu.Unlock()
+		}
+
+		r.mu.Lock()
+		ne := slices.Clone(r.log.nextEntries())
+		r.mu.Unlock()
+
+		for _, e := range ne {
+			if e.Command == nil {
+				continue
+			}
+
+			select {
+			case r.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      e.Command,
+				CommandIndex: e.Index,
+			}:
+			case <-r.done:
+				return
+			}
+			r.log.appliedTo(e.Index)
+		}
+
+		time.Sleep(r.tickInterval)
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -664,7 +740,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartbeatTimeout: 1,
 		electionTimeout:  10,
 		votedFor:         None,
-		log:              newLog(applyCh),
+		applyCh:          applyCh,
+		log:              newLog(),
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
 		msgHandlerCh:     make(chan msgHandler),
@@ -673,10 +750,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	r.becomeFollower(0, None)
 	// initialize from state persisted before a crash
-	r.readPersist(persister.ReadRaftState())
+	r.readPersist()
 
 	// start ticker goroutine to start elections
 	go r.ticker()
+	go r.applier()
 
 	return r
 }

@@ -4,11 +4,11 @@ type raftLog struct {
 	unstable
 	commitIndex int
 	lastApplied int
-	applyCh     chan ApplyMsg
+	// applyCh     chan ApplyMsg
 }
 
-func newLog(applyCh chan ApplyMsg) *raftLog {
-	return &raftLog{unstable: unstable{ent: []Entry{{}}}, applyCh: applyCh}
+func newLog() *raftLog {
+	return &raftLog{unstable: unstable{ent: []Entry{{}}}}
 }
 
 func (l *raftLog) commitTo(i int) bool {
@@ -20,38 +20,38 @@ func (l *raftLog) commitTo(i int) bool {
 	return false
 }
 
-func (l *raftLog) appliedTo(i int) {
-	if i > l.lastApplied && i <= l.commitIndex {
-		l.lastApplied = i
-	}
-}
+func (l *raftLog) appliedTo(i int) { l.lastApplied = i }
 
-func (l *raftLog) apply() {
-	if l.hasPendingSnapshot() {
-		snapshot := l.snapshot()
-		l.applyCh <- ApplyMsg{
-			SnapshotValid: true,
-			Snapshot:      snapshot.Data,
-			SnapshotTerm:  snapshot.Term,
-			SnapshotIndex: snapshot.Index,
-		}
-		l.appliedTo(l.snapshotIndex())
-	}
+// func (l *raftLog) applier() {
+// 	for {
 
-	ne := l.nextEntries()
-	for _, e := range ne {
-		if e.Command == nil {
-			continue
-		}
+// 		if l.hasPendingSnapshot() {
+// 			snapshot := l.snapshot()
+// 			l.applyCh <- ApplyMsg{
+// 				SnapshotValid: true,
+// 				Snapshot:      snapshot.Data,
+// 				SnapshotTerm:  snapshot.Term,
+// 				SnapshotIndex: snapshot.Index,
+// 			}
+// 			l.appliedTo(l.snapshotIndex())
+// 		}
 
-		l.applyCh <- ApplyMsg{
-			CommandValid: true,
-			Command:      e.Command,
-			CommandIndex: e.Index,
-		}
-		l.appliedTo(e.Index)
-	}
-}
+// 		ne := l.nextEntries()
+// 		for _, e := range ne {
+// 			if e.Command == nil {
+// 				continue
+// 			}
+
+// 			l.applyCh <- ApplyMsg{
+// 				CommandValid: true,
+// 				Command:      e.Command,
+// 				CommandIndex: e.Index,
+// 			}
+// 			l.appliedTo(e.Index)
+// 		}
+// 		time.Sleep(100 * time.Millisecond)
+// 	}
+// }
 
 func (l *raftLog) nextEntries() []Entry {
 	i := max(l.lastApplied+1, l.firstIndex())
@@ -60,6 +60,10 @@ func (l *raftLog) nextEntries() []Entry {
 	}
 	return nil
 }
+
+// func (l *raftLog) hasNextEntries() bool {
+// 	return l.commitIndex+1 > max(l.lastApplied+1, l.firstIndex())
+// }
 
 func (l *raftLog) hasPendingSnapshot() bool {
 	return l.hasSnapshot() && l.lastApplied < l.snapshotIndex()
@@ -111,11 +115,9 @@ func (l *raftLog) maybeAppend(term int, index int, commit int, entries []Entry) 
 	lastMatchIndex := index + len(entries)
 	i := l.findConflictIndex(entries)
 	if i != None {
-		l.append(entries[i-index-1:]...)
-	}
-	if l.commitTo(min(commit, lastMatchIndex)) {
-		l.apply()
+		l.append(entries[i-index-1:]...) // TODO
 	}
 
+	l.commitTo(min(commit, lastMatchIndex))
 	return lastMatchIndex, true
 }
