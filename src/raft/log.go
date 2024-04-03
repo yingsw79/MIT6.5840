@@ -4,7 +4,6 @@ type raftLog struct {
 	unstable
 	commitIndex int
 	lastApplied int
-	// applyCh     chan ApplyMsg
 }
 
 func newLog() *raftLog {
@@ -22,37 +21,6 @@ func (l *raftLog) commitTo(i int) bool {
 
 func (l *raftLog) appliedTo(i int) { l.lastApplied = i }
 
-// func (l *raftLog) applier() {
-// 	for {
-
-// 		if l.hasPendingSnapshot() {
-// 			snapshot := l.snapshot()
-// 			l.applyCh <- ApplyMsg{
-// 				SnapshotValid: true,
-// 				Snapshot:      snapshot.Data,
-// 				SnapshotTerm:  snapshot.Term,
-// 				SnapshotIndex: snapshot.Index,
-// 			}
-// 			l.appliedTo(l.snapshotIndex())
-// 		}
-
-// 		ne := l.nextEntries()
-// 		for _, e := range ne {
-// 			if e.Command == nil {
-// 				continue
-// 			}
-
-// 			l.applyCh <- ApplyMsg{
-// 				CommandValid: true,
-// 				Command:      e.Command,
-// 				CommandIndex: e.Index,
-// 			}
-// 			l.appliedTo(e.Index)
-// 		}
-// 		time.Sleep(100 * time.Millisecond)
-// 	}
-// }
-
 func (l *raftLog) nextEntries() []Entry {
 	i := max(l.lastApplied+1, l.firstIndex())
 	if l.commitIndex+1 > i {
@@ -60,10 +28,6 @@ func (l *raftLog) nextEntries() []Entry {
 	}
 	return nil
 }
-
-// func (l *raftLog) hasNextEntries() bool {
-// 	return l.commitIndex+1 > max(l.lastApplied+1, l.firstIndex())
-// }
 
 func (l *raftLog) hasPendingSnapshot() bool {
 	return l.hasSnapshot() && l.lastApplied < l.snapshotIndex()
@@ -79,6 +43,20 @@ func (l *raftLog) match(term int, index int) bool {
 	}
 
 	return l.term(index) == term
+}
+
+func (l *raftLog) maybeRestoreSnapshot(s Snapshot) bool {
+	if s.Metadata.Index <= l.commitIndex {
+		return false
+	}
+
+	if l.match(s.Metadata.Index, s.Metadata.Term) {
+		l.commitTo(s.Metadata.Index)
+		return false
+	}
+
+	l.restoreSnapshot(s)
+	return true
 }
 
 func (l *raftLog) findConflictBackup(index int) FastBackup {
@@ -115,7 +93,7 @@ func (l *raftLog) maybeAppend(term int, index int, commit int, entries []Entry) 
 	lastMatchIndex := index + len(entries)
 	i := l.findConflictIndex(entries)
 	if i != None {
-		l.append(entries[i-index-1:]...) // TODO
+		l.append(entries[i-index-1:]...)
 	}
 
 	l.commitTo(min(commit, lastMatchIndex))

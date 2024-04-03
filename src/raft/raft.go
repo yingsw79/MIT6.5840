@@ -55,10 +55,10 @@ const (
 )
 
 type HardState struct {
-	CurrentTerm int
-	VotedFor    int
-	// SnapMetadata SnapshotMetadata
-	Log []Entry
+	CurrentTerm  int
+	VotedFor     int
+	SnapMetadata SnapshotMetadata
+	Log          []Entry
 }
 
 // A Go object implementing a single Raft peer.
@@ -123,22 +123,25 @@ func (r *Raft) persist() {
 	// Your code here (2C).
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
-	st := HardState{
-		CurrentTerm: r.currentTerm,
-		VotedFor:    r.votedFor,
-		// SnapMetadata: r.log.snapshot().Metadata,
-		Log: slices.Clone(r.log.entries()),
-	}
-	enc.Encode(&st)
-	raftstate := buf.Bytes()
 
+	var snapMetadata SnapshotMetadata
 	var snapshot []byte
+
 	if r.log.hasSnapshot() {
-		buf := new(bytes.Buffer)
-		enc := labgob.NewEncoder(buf)
-		enc.Encode(r.log.snapshot())
-		snapshot = buf.Bytes()
+		snapMetadata = r.log.snapshot().Metadata
+		snapshot = r.log.snapshot().Data
 	}
+
+	st := HardState{
+		CurrentTerm:  r.currentTerm,
+		VotedFor:     r.votedFor,
+		SnapMetadata: snapMetadata,
+		Log:          slices.Clone(r.log.entries()),
+	}
+	if err := enc.Encode(&st); err != nil {
+		panic(err)
+	}
+	raftstate := buf.Bytes()
 
 	r.persister.Save(raftstate, snapshot)
 }
@@ -149,20 +152,21 @@ func (r *Raft) readPersist() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if data := r.persister.ReadSnapshot(); len(data) > 0 {
-		dec := labgob.NewDecoder(bytes.NewReader(data))
-		var snap Snapshot
-		dec.Decode(&snap)
-		r.log.restoreSnapshot(snap)
-	}
-
 	if data := r.persister.ReadRaftState(); len(data) > 0 {
-		dec := labgob.NewDecoder(bytes.NewReader(data))
 		var st HardState
-		dec.Decode(&st)
+		dec := labgob.NewDecoder(bytes.NewReader(data))
+		if err := dec.Decode(&st); err != nil {
+			panic(err)
+		}
 		r.currentTerm = st.CurrentTerm
 		r.votedFor = st.VotedFor
-		r.log.restoreEntries(st.Log)
+
+		if snapshot := r.persister.ReadSnapshot(); len(snapshot) > 0 {
+			r.log.restoreSnapshot(Snapshot{Metadata: st.SnapMetadata, Data: snapshot})
+			r.log.restoreEntries(st.Log)
+		} else {
+			r.log.restoreEntries(st.Log)
+		}
 	}
 }
 
@@ -174,18 +178,13 @@ func (r *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// log.Printf("Snapshot: %d", index)
 
 	s := Snapshot{
 		Metadata: SnapshotMetadata{Index: index, Term: r.log.term(index)},
 		Data:     snapshot,
 	}
 	r.log.stableTo(s)
-	// log.Printf("stableTo Snapshot: %d", index)
-
 	r.persist()
-	// log.Printf("persist Snapshot: %d", index)
-
 }
 
 func (r *Raft) handleRequestVote(_args any, _reply any) {
@@ -352,10 +351,16 @@ func (r *Raft) handleInstallSnapshot(_args any, _reply any) {
 	}
 
 	r.becomeFollower(args.Term, args.LeaderId)
-	r.log.stableTo(args.Snapshot)
+
+	if r.log.maybeRestoreSnapshot(args.Snapshot) {
+		reply.LastMatchIndex = r.log.lastIndex()
+	} else {
+		reply.LastMatchIndex = r.log.commitIndex
+	}
+
 	reply.Term = r.currentTerm
+	reply.FollowerId = r.me
 	reply.Success = true
-	reply.LastMatchIndex = args.Snapshot.Metadata.Index
 }
 
 func (r *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -405,28 +410,18 @@ func (r *Raft) becomeFollower(term int, LeaderId int) {
 	r.leaderId = LeaderId
 	r.tickf = r.tickElection
 	r.stepf = r.stepFollower
-	// log.Printf("%d became follower at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) becomeCandidate() {
-	if r.state == StateLeader {
-		panic("invalid transition [leader -> candidate]")
-	}
-
 	r.reset(r.currentTerm + 1)
 	r.state = StateCandidate
 	r.votedFor = r.me
 	r.votes++
 	r.tickf = r.tickElection
 	r.stepf = r.stepCandidate
-	// log.Printf("%d became candidate at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) becomeLeader() {
-	if r.state == StateFollower {
-		panic("invalid transition [follower -> leader]")
-	}
-
 	r.reset(r.currentTerm)
 	r.state = StateLeader
 	r.leaderId = r.me
@@ -438,7 +433,6 @@ func (r *Raft) becomeLeader() {
 		r.nextIndex[i] = r.log.lastIndex() + 1
 	}
 	r.matchIndex[r.me] = r.log.lastIndex()
-	// log.Printf("%d became leader at term %d", r.me, r.currentTerm)
 }
 
 func (r *Raft) reset(term int) {
@@ -691,7 +685,7 @@ func (r *Raft) applier() {
 			case <-r.done:
 				return
 			}
-			r.log.appliedTo(r.log.snapshotIndex())
+			r.log.appliedTo(snapshot.Metadata.Index)
 		} else {
 			r.mu.Unlock()
 		}
@@ -701,7 +695,7 @@ func (r *Raft) applier() {
 		r.mu.Unlock()
 
 		for _, e := range ne {
-			if e.Command == nil {
+			if e.Index == 0 {
 				continue
 			}
 

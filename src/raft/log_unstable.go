@@ -11,13 +11,18 @@ type unstable struct {
 	offset int
 }
 
-func (u *unstable) firstIndex() int { return u.offset }
+func (u *unstable) firstIndex() int {
+	if u.snap != nil {
+		return u.snap.Metadata.Index + 1
+	}
+	return 0
+}
 
 func (u *unstable) hasSnapshot() bool { return u.snap != nil }
 
 func (u *unstable) snapshot() Snapshot { return *u.snap }
 
-func (u *unstable) snapshotIndex() int { return u.snap.Metadata.Index }
+func (u *unstable) snapshotIndex() int { return u.snap.Metadata.Index } // TODO
 
 func (u *unstable) lastIndex() int {
 	if l := len(u.ent); l != 0 {
@@ -61,17 +66,6 @@ func (u *unstable) stableTo(s Snapshot) {
 	}
 }
 
-// func (u *unstable) stableTo(s Snapshot) { // TODO
-// 	if s.Term == u.term(s.Index) && s.Index >= u.offset && s.Index <= u.lastIndex() {
-// 		u.ent = u.entriesFrom(s.Index + 1)
-// 		u.offset = s.Index + 1
-// 		u.shrinkEntries()
-// 		u.snap = &s
-// 	} else if s.Index > u.lastIndex() {
-// 		u.restoreSnapshot(s)
-// 	}
-// }
-
 func (u *unstable) shrinkEntries() {
 	if len(u.ent)*2 < cap(u.ent) {
 		u.ent = slices.Clone(u.ent)
@@ -87,22 +81,18 @@ func (u *unstable) restoreSnapshot(s Snapshot) {
 }
 
 func (u *unstable) append(entries ...Entry) {
+	if len(entries) == 0 {
+		return
+	}
+
 	after := entries[0].Index
 	switch {
 	case after == u.offset+int(len(u.ent)):
-		// after is the next index in the u.entries
-		// directly append
 		u.ent = append(u.ent, entries...)
-	case after <= u.offset: // TODO
-		log.Printf("replace the unstable entries from index %d", after)
-		// The log is being truncated to before our current offset
-		// portion, so set the offset and replace the entries
+	case after <= u.offset:
 		u.offset = after
 		u.ent = entries
 	default:
-		// truncate to after and copy to u.entries
-		// then append
-		log.Printf("truncate the unstable entries before index %d", after)
 		u.ent = append([]Entry{}, u.slice(u.offset, after)...)
 		u.ent = append(u.ent, entries...)
 	}
@@ -114,7 +104,7 @@ func (u *unstable) slice(lo int, hi int) []Entry {
 }
 
 func (u *unstable) entriesFrom(i int) []Entry {
-	return u.slice(max(i, u.firstIndex()), u.lastIndex()+1)
+	return u.slice(i, u.lastIndex()+1)
 }
 
 func (u *unstable) entries() []Entry { return u.entriesFrom(u.firstIndex()) }
