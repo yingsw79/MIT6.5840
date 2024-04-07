@@ -97,7 +97,7 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	done chan struct{}
+	shutdown chan struct{}
 }
 
 // return currentTerm and whether this server
@@ -270,7 +270,7 @@ func (r *Raft) broadcastRequestVote() {
 			if r.sendRequestVote(i, args, reply) {
 				select {
 				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-				case <-r.done:
+				case <-r.shutdown:
 				}
 			}
 		}()
@@ -326,7 +326,7 @@ func (r *Raft) sendAppendEntries(to int) {
 		if r.peers[to].Call("Raft.AppendEntries", args, reply) {
 			select {
 			case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-			case <-r.done:
+			case <-r.shutdown:
 			}
 		}
 	}()
@@ -379,7 +379,7 @@ func (r *Raft) sendInstallSnapshot(to int) {
 		if r.peers[to].Call("Raft.InstallSnapshot", args, reply) {
 			select {
 			case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-			case <-r.done:
+			case <-r.shutdown:
 			}
 		}
 	}()
@@ -395,12 +395,12 @@ func (r *Raft) rpc(args, reply any, handler func(any, any)) {
 
 	select {
 	case r.msgHandlerCh <- msg:
-	case <-r.done:
+	case <-r.shutdown:
 		return
 	}
 	select {
 	case <-msg.done:
-	case <-r.done:
+	case <-r.shutdown:
 	}
 }
 
@@ -593,7 +593,6 @@ func (r *Raft) Start(command any) (int, int, bool) {
 	index = r.log.lastIndex() + 1
 	r.log.append(Entry{Term: term, Index: index, Command: command})
 	r.matchIndex[r.me]++
-	r.broadcastAppendEntries()
 	r.persist()
 
 	return index, term, isLeader
@@ -619,7 +618,7 @@ func (r *Raft) Kill() {
 }
 
 func (r *Raft) kill() {
-	close(r.done)
+	close(r.shutdown)
 	r.dead = true
 }
 
@@ -657,7 +656,7 @@ func (r *Raft) ticker() {
 			r.tick()
 		case h := <-r.msgHandlerCh:
 			r.handle(h)
-		case <-r.done:
+		case <-r.shutdown:
 			return
 		}
 	}
@@ -682,7 +681,7 @@ func (r *Raft) applier() {
 				SnapshotTerm:  snapshot.Metadata.Term,
 				SnapshotIndex: snapshot.Metadata.Index,
 			}:
-			case <-r.done:
+			case <-r.shutdown:
 				return
 			}
 			r.log.appliedTo(snapshot.Metadata.Index)
@@ -705,7 +704,7 @@ func (r *Raft) applier() {
 				Command:      e.Command,
 				CommandIndex: e.Index,
 			}:
-			case <-r.done:
+			case <-r.shutdown:
 				return
 			}
 			r.log.appliedTo(e.Index)
@@ -739,7 +738,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
 		msgHandlerCh:     make(chan msgHandler),
-		done:             make(chan struct{}),
+		shutdown:         make(chan struct{}),
 	}
 	// Your initialization code here (2A, 2B, 2C).
 	r.becomeFollower(0, None)
