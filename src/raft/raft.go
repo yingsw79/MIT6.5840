@@ -427,6 +427,7 @@ func (r *Raft) becomeLeader() {
 	r.leaderId = r.me
 	r.tickf = r.tickHeartbeat
 	r.stepf = r.stepLeader
+	// r.log.append(Entry{Term: r.currentTerm, Index: r.log.lastIndex() + 1})
 
 	for i := range r.peers {
 		r.matchIndex[i] = 0
@@ -593,6 +594,7 @@ func (r *Raft) Start(command any) (int, int, bool) {
 	index = r.log.lastIndex() + 1
 	r.log.append(Entry{Term: term, Index: index, Command: command})
 	r.matchIndex[r.me]++
+	r.broadcastAppendEntries()
 	r.persist()
 
 	return index, term, isLeader
