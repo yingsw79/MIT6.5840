@@ -44,25 +44,3 @@ type rpcReplyMsgHandler struct {
 func (h rpcReplyMsgHandler) handle() {
 	h.handler.stepf(h.reply)
 }
-
-// type serviceMsgHandler struct {
-// 	msg     *ApplyMsg
-// 	handler *Raft
-// }
-
-// func (h serviceMsgHandler) handle() {
-// 	h.handler.step(h.msg)
-// 	go func() {
-// 		select {
-// 		case h.handler.applyCh <- *h.msg:
-// 		case <-h.handler.done:
-// 		}
-// 	}()
-// }
-
-// type progress struct {
-// 	match int
-// 	next  int
-// }
-
-// type tracker []progress

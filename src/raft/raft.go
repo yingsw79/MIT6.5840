@@ -55,10 +55,10 @@ const (
 )
 
 type HardState struct {
-	CurrentTerm  int
-	VotedFor     int
-	SnapMetadata SnapshotMetadata
-	Log          []Entry
+	CurrentTerm      int
+	VotedFor         int
+	SnapshotMetadata SnapshotMetadata
+	Log              []Entry
 }
 
 // A Go object implementing a single Raft peer.
@@ -97,7 +97,7 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	done chan struct{}
+	shutdown chan struct{}
 }
 
 // return currentTerm and whether this server
@@ -124,19 +124,19 @@ func (r *Raft) persist() {
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
 
-	var snapMetadata SnapshotMetadata
+	var snapshotMetadata SnapshotMetadata
 	var snapshot []byte
 
-	if r.log.hasSnapshot() {
-		snapMetadata = r.log.snapshot().Metadata
-		snapshot = r.log.snapshot().Data
+	if s := r.log.snapshot(); s != nil {
+		snapshotMetadata = s.Metadata
+		snapshot = s.Data
 	}
 
 	st := HardState{
-		CurrentTerm:  r.currentTerm,
-		VotedFor:     r.votedFor,
-		SnapMetadata: snapMetadata,
-		Log:          slices.Clone(r.log.entries()),
+		CurrentTerm:      r.currentTerm,
+		VotedFor:         r.votedFor,
+		SnapshotMetadata: snapshotMetadata,
+		Log:              slices.Clone(r.log.entries()),
 	}
 	if err := enc.Encode(&st); err != nil {
 		panic(err)
@@ -162,7 +162,7 @@ func (r *Raft) readPersist() {
 		r.votedFor = st.VotedFor
 
 		if snapshot := r.persister.ReadSnapshot(); len(snapshot) > 0 {
-			r.log.restoreSnapshot(Snapshot{Metadata: st.SnapMetadata, Data: snapshot})
+			r.log.restoreSnapshot(Snapshot{Metadata: st.SnapshotMetadata, Data: snapshot})
 			r.log.restoreEntries(st.Log)
 		} else {
 			r.log.restoreEntries(st.Log)
@@ -270,7 +270,7 @@ func (r *Raft) broadcastRequestVote() {
 			if r.sendRequestVote(i, args, reply) {
 				select {
 				case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-				case <-r.done:
+				case <-r.shutdown:
 				}
 			}
 		}()
@@ -307,8 +307,7 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 }
 
 func (r *Raft) sendAppendEntries(to int) {
-	if r.log.hasSnapshot() && r.log.snapshotIndex() >= r.nextIndex[to] {
-		r.sendInstallSnapshot(to)
+	if r.maybeSendInstallSnapshot(to) {
 		return
 	}
 
@@ -326,7 +325,7 @@ func (r *Raft) sendAppendEntries(to int) {
 		if r.peers[to].Call("Raft.AppendEntries", args, reply) {
 			select {
 			case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-			case <-r.done:
+			case <-r.shutdown:
 			}
 		}
 	}()
@@ -367,11 +366,16 @@ func (r *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshot
 	r.rpc(args, reply, r.handleInstallSnapshot)
 }
 
-func (r *Raft) sendInstallSnapshot(to int) {
+func (r *Raft) maybeSendInstallSnapshot(to int) bool {
+	s := r.log.snapshot()
+	if s == nil || s.Metadata.Index < r.nextIndex[to] {
+		return false
+	}
+
 	args := &InstallSnapshotArgs{
 		Term:     r.currentTerm,
 		LeaderId: r.leaderId,
-		Snapshot: r.log.snapshot(),
+		Snapshot: *s,
 	}
 	reply := &InstallSnapshotReply{}
 
@@ -379,10 +383,12 @@ func (r *Raft) sendInstallSnapshot(to int) {
 		if r.peers[to].Call("Raft.InstallSnapshot", args, reply) {
 			select {
 			case r.msgHandlerCh <- rpcReplyMsgHandler{reply: reply, handler: r}:
-			case <-r.done:
+			case <-r.shutdown:
 			}
 		}
 	}()
+
+	return true
 }
 
 func (r *Raft) rpc(args, reply any, handler func(any, any)) {
@@ -395,12 +401,12 @@ func (r *Raft) rpc(args, reply any, handler func(any, any)) {
 
 	select {
 	case r.msgHandlerCh <- msg:
-	case <-r.done:
+	case <-r.shutdown:
 		return
 	}
 	select {
 	case <-msg.done:
-	case <-r.done:
+	case <-r.shutdown:
 	}
 }
 
@@ -513,8 +519,6 @@ func (r *Raft) stepLeader(msg any) {
 			r.becomeFollower(msg.Term, None)
 		} else if msg.Success {
 			r.updateTrack(msg.FollowerId, msg.LastMatchIndex)
-		} else {
-			r.sendInstallSnapshot(msg.FollowerId)
 		}
 	}
 }
@@ -564,7 +568,12 @@ func (r *Raft) followerCommitIndex() int {
 	return m[len(r.peers)/2]
 }
 
-func (r *Raft) maybeCommit() bool { return r.log.commitTo(r.followerCommitIndex()) }
+func (r *Raft) maybeCommit() bool {
+	if i := r.followerCommitIndex(); r.log.term(i) == r.currentTerm {
+		return r.log.commitTo(i)
+	}
+	return false
+}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -593,7 +602,6 @@ func (r *Raft) Start(command any) (int, int, bool) {
 	index = r.log.lastIndex() + 1
 	r.log.append(Entry{Term: term, Index: index, Command: command})
 	r.matchIndex[r.me]++
-	r.broadcastAppendEntries()
 	r.persist()
 
 	return index, term, isLeader
@@ -619,7 +627,7 @@ func (r *Raft) Kill() {
 }
 
 func (r *Raft) kill() {
-	close(r.done)
+	close(r.shutdown)
 	r.dead = true
 }
 
@@ -657,7 +665,7 @@ func (r *Raft) ticker() {
 			r.tick()
 		case h := <-r.msgHandlerCh:
 			r.handle(h)
-		case <-r.done:
+		case <-r.shutdown:
 			return
 		}
 	}
@@ -671,28 +679,23 @@ func (r *Raft) applier() {
 			return
 		}
 
-		if r.log.hasPendingSnapshot() {
-			snapshot := r.log.snapshot()
-			r.mu.Unlock()
+		s := r.log.nextSnapshot()
+		ne := slices.Clone(r.log.nextEntries())
+		r.mu.Unlock()
 
+		if s != nil {
 			select {
 			case r.applyCh <- ApplyMsg{
 				SnapshotValid: true,
-				Snapshot:      snapshot.Data,
-				SnapshotTerm:  snapshot.Metadata.Term,
-				SnapshotIndex: snapshot.Metadata.Index,
+				Snapshot:      s.Data,
+				SnapshotTerm:  s.Metadata.Term,
+				SnapshotIndex: s.Metadata.Index,
 			}:
-			case <-r.done:
+			case <-r.shutdown:
 				return
 			}
-			r.log.appliedTo(snapshot.Metadata.Index)
-		} else {
-			r.mu.Unlock()
+			r.log.appliedTo(s.Metadata.Index)
 		}
-
-		r.mu.Lock()
-		ne := slices.Clone(r.log.nextEntries())
-		r.mu.Unlock()
 
 		for _, e := range ne {
 			if e.Index == 0 {
@@ -705,7 +708,7 @@ func (r *Raft) applier() {
 				Command:      e.Command,
 				CommandIndex: e.Index,
 			}:
-			case <-r.done:
+			case <-r.shutdown:
 				return
 			}
 			r.log.appliedTo(e.Index)
@@ -739,7 +742,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
 		msgHandlerCh:     make(chan msgHandler),
-		done:             make(chan struct{}),
+		shutdown:         make(chan struct{}),
 	}
 	// Your initialization code here (2A, 2B, 2C).
 	r.becomeFollower(0, None)
