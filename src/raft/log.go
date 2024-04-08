@@ -26,11 +26,16 @@ func (l *raftLog) nextEntries() []Entry {
 	if l.commitIndex+1 > i {
 		return l.slice(i, l.commitIndex+1)
 	}
+
 	return nil
 }
 
-func (l *raftLog) hasPendingSnapshot() bool {
-	return l.hasSnapshot() && l.lastApplied < l.snapshotIndex()
+func (l *raftLog) nextSnapshot() *Snapshot {
+	if s := l.snapshot(); s != nil && l.lastApplied < s.Metadata.Index {
+		return s
+	}
+
+	return nil
 }
 
 func (l *raftLog) isUpToDate(term int, index int) bool {

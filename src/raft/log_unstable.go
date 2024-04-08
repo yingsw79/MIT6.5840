@@ -18,18 +18,14 @@ func (u *unstable) firstIndex() int {
 	return 0
 }
 
-func (u *unstable) hasSnapshot() bool { return u.snap != nil }
-
-func (u *unstable) snapshot() Snapshot { return *u.snap }
-
-func (u *unstable) snapshotIndex() int { return u.snap.Metadata.Index } // TODO
+func (u *unstable) snapshot() *Snapshot { return u.snap }
 
 func (u *unstable) lastIndex() int {
 	if l := len(u.ent); l != 0 {
 		return u.offset + int(l) - 1
 	}
-	if u.hasSnapshot() {
-		return u.snapshotIndex()
+	if u.snap != nil {
+		return u.snap.Metadata.Index
 	}
 	return 0
 }
@@ -38,7 +34,7 @@ func (u *unstable) lastTerm() int { return u.term(u.lastIndex()) }
 
 func (u *unstable) term(i int) int {
 	if i < u.offset {
-		if u.hasSnapshot() && u.snapshotIndex() == i {
+		if u.snap != nil && u.snap.Metadata.Index == i {
 			return u.snap.Metadata.Term
 		}
 		return 0
