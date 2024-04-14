@@ -1,10 +1,12 @@
 package kvraft
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrShutdown    = "ErrShutdown"
+	OK                  = "OK"
+	ErrNoKey            = "ErrNoKey"
+	ErrWrongLeader      = "ErrWrongLeader"
+	ErrDuplicateRequest = "ErrDuplicateRequest"
+	ErrTimeout          = "ErrTimeout"
+	ErrServerShutdown   = "ErrServerShutdown"
 )
 
 type Err string
@@ -25,7 +27,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Id int
+	ClientId int64
+	Seq      int
 }
 
 type PutAppendReply struct {
@@ -35,35 +38,13 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
-	Id int
+	ClientId int64
+	Seq      int
 }
 
-type GetReply struct {
+type GetReply Reply
+
+type Reply struct {
 	Err   Err
 	Value string
-}
-
-type rpcMsgHandler struct {
-	id    int
-	args  any
-	reply any
-	done  chan struct{}
-}
-
-type appliedMsg struct {
-	id    int
-	err   Err
-	value string
-}
-
-func (h *rpcMsgHandler) handle(m appliedMsg) {
-	switch reply := h.reply.(type) {
-	case *GetReply:
-		reply.Value = m.value
-		reply.Err = m.err
-		close(h.done)
-	case *PutAppendReply:
-		reply.Err = m.err
-		close(h.done)
-	}
 }

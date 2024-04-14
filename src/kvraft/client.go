@@ -50,13 +50,14 @@ func (ck *Clerk) Get(key string) string {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
-func (ck *Clerk) PutAppend(key string, value string, op string) {
+func (ck *Clerk) PutAppend(key string, value string, op OpType) {
 	// You will have to modify this function.
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, OpPut)
 }
+
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, OpAppend)
 }

@@ -1,43 +1,31 @@
 package kvraft
 
 import (
-	"log"
+	"bytes"
 	"sync/atomic"
+	"time"
 
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
 )
 
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-// type opArgs struct {
-// 	OpType opType
-// 	Key    string
-// 	Value  string
-// }
-
-// type opReply struct {
-// 	Value string
-// 	Err   error
-// 	Done  chan struct{}
-// }
+const timeout = time.Second
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Type  OpType
-	Id    int
-	Key   string
-	Value string
+	ClientId int64
+	Seq      int
+	Type     OpType
+	Key      string
+	Value    string
+}
+
+type Snapshot struct {
+	StateMachine KVStateMachine
+	LastOps      LastOps
 }
 
 type KVServer struct {
@@ -50,119 +38,123 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvmap   map[string]string
-	cache   map[int]appliedMsg
-	pending map[int]rpcMsgHandler
+	stateMachine KVStateMachine
+	cache        *cache
+	notifier     *notifier
 
-	msgHandlerCh chan rpcMsgHandler
-	shutdown     chan struct{}
+	lastApplied int
+
+	shutdown chan struct{}
 }
 
 func (srv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	if _, isLeader := srv.rf.GetState(); !isLeader {
+	if v, ok := srv.cache.load(args.ClientId); ok {
+		if v.Seq == args.Seq {
+			reply.Value, reply.Err = v.Value, v.Err
+			return
+		} else if v.Seq > args.Seq {
+			reply.Err = ErrDuplicateRequest
+			return
+		}
+	}
+
+	index, _, isLeader := srv.rf.Start(Op{Seq: args.Seq, Type: OpGet, Key: args.Key})
+	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	done := make(chan struct{})
-	msg := rpcMsgHandler{
-		id:    args.Id,
-		reply: reply,
-		done:  done,
-	}
+	replyCh := srv.notifier.register(index)
 
 	select {
-	case srv.msgHandlerCh <- msg:
+	case r := <-replyCh:
+		reply.Value, reply.Err = r.Value, r.Err
+	case <-time.After(timeout):
+		reply.Err = ErrTimeout
 	case <-srv.shutdown:
-		reply.Err = ErrShutdown
-		return
+		reply.Err = ErrServerShutdown
 	}
 
-	// srv.rf.Start(Op{Type: OpGet, Id: args.Id, Key: args.Key})
-
-	select {
-	case <-done:
-	case <-srv.shutdown:
-		reply.Err = ErrShutdown
-	}
+	go srv.notifier.unregister(index)
 }
 
 func (srv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	if _, isLeader := srv.rf.GetState(); !isLeader {
+	if v, ok := srv.cache.load(args.ClientId); ok {
+		if v.Seq == args.Seq {
+			reply.Err = v.Err
+			return
+		} else if v.Seq > args.Seq {
+			reply.Err = ErrDuplicateRequest
+			return
+		}
+	}
+
+	index, _, isLeader := srv.rf.Start(Op{Seq: args.Seq, Type: args.Type, Key: args.Key, Value: args.Value})
+	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	done := make(chan struct{})
-	msg := rpcMsgHandler{
-		id:    args.Id,
-		reply: reply,
-		done:  done,
-	}
+	replyCh := srv.notifier.register(index)
 
 	select {
-	case srv.msgHandlerCh <- msg:
+	case r := <-replyCh:
+		reply.Err = r.Err
+	case <-time.After(timeout):
+		reply.Err = ErrTimeout
 	case <-srv.shutdown:
-		reply.Err = ErrShutdown
-		return
+		reply.Err = ErrServerShutdown
 	}
 
-	// srv.rf.Start(Op{Type: args.Type, Id: args.Id, Key: args.Key, Value: args.Value})
-
-	select {
-	case <-done:
-	case <-srv.shutdown:
-		reply.Err = ErrShutdown
-	}
+	go srv.notifier.unregister(index)
 }
 
 func (srv *KVServer) applier() {
 	for {
 		select {
-		case am := <-srv.applyCh:
-			if am.CommandValid {
-				op := am.Command.(Op)
-				var m appliedMsg
-				switch op.Type {
-				case OpGet:
-					if v, ok := srv.kvmap[op.Key]; ok {
-						m.value = v
-					} else {
-						m.err = ErrNoKey
-					}
-				case OpPut:
-					srv.kvmap[op.Key] = op.Value
-				case OpAppend:
-					srv.kvmap[op.Key] += op.Value
+		case msg := <-srv.applyCh:
+			if msg.CommandValid {
+				if msg.CommandIndex <= srv.lastApplied {
+					continue
 				}
 
-				h := srv.pending[op.Id]
-				h.handle(m)
-				srv.cache[h.id] = m
-				delete(srv.pending, op.Id)
-			}
-		case h := <-srv.msgHandlerCh:
-			if m, ok := srv.cache[h.id]; ok {
-				h.handle(m)
-			} else {
-				switch args := h.args.(type) {
-				case *GetReply:
-					args.Value = m.value
-					args.Err = m.err
-					close(h.done)
-				case *PutAppendReply:
-					args.Err = m.err
-					close(h.done)
+				var reply Reply
+				op := msg.Command.(Op)
+				if v, ok := srv.cache.load(op.ClientId); ok && v.Seq >= op.Seq {
+					if v.Seq == op.Seq {
+						reply.Value, reply.Err = v.Value, v.Err
+					} else if v.Seq > op.Seq {
+						reply.Err = ErrDuplicateRequest
+					}
+				} else {
+
 				}
-				srv.pending[h.id] = h
-				// srv.rf.Start(Op{Type: args.Type, Id: args.Id, Key: args.Key, Value: args.Value})
+
+				var m OpContext
+				switch op.Type {
+				case OpGet:
+				case OpPut:
+				case OpAppend:
+				}
+
 			}
 		case <-srv.shutdown:
 			return
 		}
 	}
+}
+
+func (srv *KVServer) snapshot() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buf)
+	snapshot := Snapshot{StateMachine: srv.stateMachine, LastOps: srv.cache.getLastOps()}
+	if err := enc.Encode(&snapshot); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -200,12 +192,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(MemoryKV{})
 
 	srv := new(KVServer)
 	srv.me = me
 	srv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	srv.stateMachine = NewMemoryKV()
 
 	srv.applyCh = make(chan raft.ApplyMsg)
 	srv.rf = raft.Make(servers, me, persister, srv.applyCh)
