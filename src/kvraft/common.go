@@ -1,13 +1,16 @@
 package kvraft
 
+import "time"
+
 const (
-	OK                  = "OK"
-	ErrNoKey            = "ErrNoKey"
-	ErrWrongLeader      = "ErrWrongLeader"
-	ErrDuplicateRequest = "ErrDuplicateRequest"
-	ErrTimeout          = "ErrTimeout"
-	ErrServerShutdown   = "ErrServerShutdown"
+	OK                = "OK"
+	ErrNoKey          = "ErrNoKey"
+	ErrWrongLeader    = "ErrWrongLeader"
+	ErrServerTimeout  = "ErrServerTimeout"
+	ErrServerShutdown = "ErrServerShutdown"
 )
+
+const timeout = 500 * time.Millisecond
 
 type Err string
 
@@ -19,17 +22,19 @@ const (
 	OpAppend
 )
 
-// Put or Append
-type PutAppendArgs struct {
-	Key   string
-	Value string
-	Type  OpType // "Put" or "Append"
-	// You'll have to add definitions here.
+type Op struct {
+	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	ClientId int64
 	Seq      int
+	Type     OpType
+	Key      string
+	Value    string
 }
+
+// Put or Append
+type PutAppendArgs Op
 
 type PutAppendReply struct {
 	Err Err

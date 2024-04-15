@@ -39,6 +39,7 @@ import (
 type ApplyMsg struct {
 	CommandValid bool
 	Command      any
+	CommandTerm  int
 	CommandIndex int
 
 	// For 2D:
@@ -93,6 +94,8 @@ type Raft struct {
 
 	applyCh      chan ApplyMsg
 	msgHandlerCh chan msgHandler
+
+	applyCond *sync.Cond
 
 	nextIndex  []int
 	matchIndex []int
@@ -602,6 +605,7 @@ func (r *Raft) Start(command any) (int, int, bool) {
 	index = r.log.lastIndex() + 1
 	r.log.append(Entry{Term: term, Index: index, Command: command})
 	r.matchIndex[r.me]++
+	r.broadcastAppendEntries()
 	r.persist()
 
 	return index, term, isLeader
@@ -679,6 +683,10 @@ func (r *Raft) applier() {
 			return
 		}
 
+		for !r.log.readyToApply() {
+			r.applyCond.Wait()
+		}
+
 		s := r.log.nextSnapshot()
 		ne := slices.Clone(r.log.nextEntries())
 		r.mu.Unlock()
@@ -706,6 +714,7 @@ func (r *Raft) applier() {
 			case r.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      e.Command,
+				CommandTerm:  e.Term,
 				CommandIndex: e.Index,
 			}:
 			case <-r.shutdown:
@@ -713,8 +722,6 @@ func (r *Raft) applier() {
 			}
 			r.log.appliedTo(e.Index)
 		}
-
-		time.Sleep(r.tickInterval)
 	}
 }
 
@@ -744,6 +751,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		msgHandlerCh:     make(chan msgHandler),
 		shutdown:         make(chan struct{}),
 	}
+	r.applyCond = sync.NewCond(&r.mu)
 	// Your initialization code here (2A, 2B, 2C).
 	r.becomeFollower(0, None)
 	// initialize from state persisted before a crash

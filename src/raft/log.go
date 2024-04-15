@@ -10,6 +10,8 @@ func newLog() *raftLog {
 	return &raftLog{unstable: unstable{ent: []Entry{{}}}}
 }
 
+func (l *raftLog) readyToApply() bool { return l.lastApplied < l.commitIndex }
+
 func (l *raftLog) commitTo(i int) bool {
 	if i > l.commitIndex && i <= l.lastIndex() {
 		l.commitIndex = i
@@ -61,6 +63,7 @@ func (l *raftLog) maybeRestoreSnapshot(s Snapshot) bool {
 	}
 
 	l.restoreSnapshot(s)
+	l.commitTo(s.Metadata.Index)
 	return true
 }
 

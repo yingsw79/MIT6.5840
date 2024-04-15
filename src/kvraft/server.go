@@ -10,19 +10,6 @@ import (
 	"6.5840/raft"
 )
 
-const timeout = time.Second
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-	ClientId int64
-	Seq      int
-	Type     OpType
-	Key      string
-	Value    string
-}
-
 type Snapshot struct {
 	StateMachine KVStateMachine
 	LastOps      LastOps
@@ -49,17 +36,12 @@ type KVServer struct {
 
 func (srv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	if v, ok := srv.cache.load(args.ClientId); ok {
-		if v.Seq == args.Seq {
-			reply.Value, reply.Err = v.Value, v.Err
-			return
-		} else if v.Seq > args.Seq {
-			reply.Err = ErrDuplicateRequest
-			return
-		}
+	if v, ok := srv.cache.load(args.ClientId); ok && v.Seq >= args.Seq {
+		reply.Value, reply.Err = v.Value, v.Err
+		return
 	}
 
-	index, _, isLeader := srv.rf.Start(Op{Seq: args.Seq, Type: OpGet, Key: args.Key})
+	index, _, isLeader := srv.rf.Start(Op{ClientId: args.ClientId, Seq: args.Seq, Type: OpGet, Key: args.Key})
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -71,7 +53,7 @@ func (srv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	case r := <-replyCh:
 		reply.Value, reply.Err = r.Value, r.Err
 	case <-time.After(timeout):
-		reply.Err = ErrTimeout
+		reply.Err = ErrServerTimeout
 	case <-srv.shutdown:
 		reply.Err = ErrServerShutdown
 	}
@@ -81,17 +63,12 @@ func (srv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (srv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	if v, ok := srv.cache.load(args.ClientId); ok {
-		if v.Seq == args.Seq {
-			reply.Err = v.Err
-			return
-		} else if v.Seq > args.Seq {
-			reply.Err = ErrDuplicateRequest
-			return
-		}
+	if v, ok := srv.cache.load(args.ClientId); ok && v.Seq >= args.Seq {
+		reply.Err = v.Err
+		return
 	}
 
-	index, _, isLeader := srv.rf.Start(Op{Seq: args.Seq, Type: args.Type, Key: args.Key, Value: args.Value})
+	index, _, isLeader := srv.rf.Start(Op(*args))
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -103,7 +80,7 @@ func (srv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case r := <-replyCh:
 		reply.Err = r.Err
 	case <-time.After(timeout):
-		reply.Err = ErrTimeout
+		reply.Err = ErrServerTimeout
 	case <-srv.shutdown:
 		reply.Err = ErrServerShutdown
 	}
@@ -111,39 +88,28 @@ func (srv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	go srv.notifier.unregister(index)
 }
 
-func (srv *KVServer) applier() {
-	for {
-		select {
-		case msg := <-srv.applyCh:
-			if msg.CommandValid {
-				if msg.CommandIndex <= srv.lastApplied {
-					continue
-				}
-
-				var reply Reply
-				op := msg.Command.(Op)
-				if v, ok := srv.cache.load(op.ClientId); ok && v.Seq >= op.Seq {
-					if v.Seq == op.Seq {
-						reply.Value, reply.Err = v.Value, v.Err
-					} else if v.Seq > op.Seq {
-						reply.Err = ErrDuplicateRequest
-					}
-				} else {
-
-				}
-
-				var m OpContext
-				switch op.Type {
-				case OpGet:
-				case OpPut:
-				case OpAppend:
-				}
-
-			}
-		case <-srv.shutdown:
-			return
-		}
+func (srv *KVServer) applyCommand(op *Op) (reply Reply) {
+	switch op.Type {
+	case OpGet:
+		reply.Value, reply.Err = srv.stateMachine.Get(op.Key)
+	case OpPut:
+		reply.Err = srv.stateMachine.Put(op.Key, op.Value)
+	case OpAppend:
+		reply.Err = srv.stateMachine.Append(op.Key, op.Value)
 	}
+	return
+}
+
+func (srv *KVServer) applySnapshot(data []byte) error {
+	var snapshot Snapshot
+	dec := labgob.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&snapshot); err != nil {
+		return err
+	}
+
+	srv.stateMachine = snapshot.StateMachine
+	srv.cache.setLastOps(snapshot.LastOps)
+	return nil
 }
 
 func (srv *KVServer) snapshot() ([]byte, error) {
@@ -157,6 +123,46 @@ func (srv *KVServer) snapshot() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func (srv *KVServer) applier() {
+	for {
+		select {
+		case msg := <-srv.applyCh:
+			if msg.CommandValid {
+				if srv.lastApplied >= msg.CommandIndex {
+					continue
+				}
+
+				var reply Reply
+				op := msg.Command.(Op)
+				if v, ok := srv.cache.load(op.ClientId); ok && v.Seq >= op.Seq {
+					reply.Value, reply.Err = v.Value, v.Err
+				} else {
+					reply = srv.applyCommand(&op)
+					srv.cache.store(op.ClientId, OpContext{Seq: op.Seq, Reply: reply})
+				}
+				srv.lastApplied = msg.CommandIndex
+
+				if currentTerm, isLeader := srv.rf.GetState(); isLeader && msg.CommandTerm == currentTerm {
+					srv.notifier.notify(msg.CommandIndex, reply)
+				}
+
+			} else if msg.SnapshotValid {
+				if srv.lastApplied >= msg.SnapshotIndex {
+					continue
+				}
+
+				if err := srv.applySnapshot(msg.Snapshot); err != nil {
+					panic(err)
+				}
+
+				srv.lastApplied = msg.SnapshotIndex
+			}
+		case <-srv.shutdown:
+			return
+		}
+	}
+}
+
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -166,9 +172,14 @@ func (srv *KVServer) snapshot() ([]byte, error) {
 // about this, but it may be convenient (for example)
 // to suppress debug output from a Kill()ed instance.
 func (srv *KVServer) Kill() {
+	if srv.killed() {
+		return
+	}
+
 	atomic.StoreInt32(&srv.dead, 1)
 	srv.rf.Kill()
 	// Your code here, if desired.
+	close(srv.shutdown)
 }
 
 func (srv *KVServer) killed() bool {
@@ -194,17 +205,20 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	labgob.Register(Op{})
 	labgob.Register(MemoryKV{})
 
-	srv := new(KVServer)
-	srv.me = me
-	srv.maxraftstate = maxraftstate
-
 	// You may need initialization code here.
-	srv.stateMachine = NewMemoryKV()
+	applyCh := make(chan raft.ApplyMsg)
+	srv := &KVServer{
+		me:           me,
+		maxraftstate: maxraftstate,
+		applyCh:      applyCh,
+		rf:           raft.Make(servers, me, persister, applyCh),
+		stateMachine: NewMemoryKV(),
+		cache:        newCache(),
+		notifier:     newNotifier(),
+		shutdown:     make(chan struct{}),
+	}
 
-	srv.applyCh = make(chan raft.ApplyMsg)
-	srv.rf = raft.Make(servers, me, persister, srv.applyCh)
-
-	// You may need initialization code here.
+	go srv.applier()
 
 	return srv
 }

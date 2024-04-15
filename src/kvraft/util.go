@@ -1,22 +1,13 @@
 package kvraft
 
 import (
-	"log"
 	"sync"
+	"time"
 )
 
-const debug = false
-
-func DPrintf(format string, v ...any) {
-	if debug {
-		log.Printf(format, v...)
-	}
-}
-
 type OpContext struct {
-	Seq   int
-	Err   Err
-	Value string
+	Seq int
+	Reply
 }
 
 type LastOps map[int64]OpContext
@@ -77,14 +68,19 @@ func (n *notifier) unregister(index int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if ch, ok := n.notifyMap[index]; ok {
-		close(ch)
-		delete(n.notifyMap, index)
-	}
+	delete(n.notifyMap, index)
 }
 
 func (n *notifier) notify(index int, reply Reply) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	if ch, ok := n.notifyMap[index]; ok {
-		ch <- reply
+		go func() {
+			select {
+			case ch <- reply:
+			case <-time.After(timeout):
+			}
+		}()
 	}
 }
