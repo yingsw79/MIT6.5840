@@ -92,10 +92,7 @@ type Raft struct {
 
 	log *raftLog
 
-	applyCh      chan ApplyMsg
 	msgHandlerCh chan msgHandler
-
-	applyCond *sync.Cond
 
 	nextIndex  []int
 	matchIndex []int
@@ -565,14 +562,14 @@ func (r *Raft) tickHeartbeat() {
 	}
 }
 
-func (r *Raft) followerCommitIndex() int {
+func (r *Raft) quorumIndex() int {
 	m := slices.Clone(r.matchIndex)
 	slices.Sort(m)
 	return m[len(r.peers)/2]
 }
 
 func (r *Raft) maybeCommit() bool {
-	if i := r.followerCommitIndex(); r.log.term(i) == r.currentTerm {
+	if i := r.quorumIndex(); r.log.term(i) == r.currentTerm {
 		return r.log.commitTo(i)
 	}
 	return false
@@ -633,6 +630,7 @@ func (r *Raft) Kill() {
 func (r *Raft) kill() {
 	close(r.shutdown)
 	r.dead = true
+	r.log.kill()
 }
 
 func (r *Raft) killed() bool { return r.dead }
@@ -675,56 +673,6 @@ func (r *Raft) ticker() {
 	}
 }
 
-func (r *Raft) applier() {
-	for {
-		r.mu.Lock()
-		if r.killed() {
-			r.mu.Unlock()
-			return
-		}
-
-		for !r.log.readyToApply() {
-			r.applyCond.Wait()
-		}
-
-		s := r.log.nextSnapshot()
-		ne := slices.Clone(r.log.nextEntries())
-		r.mu.Unlock()
-
-		if s != nil {
-			select {
-			case r.applyCh <- ApplyMsg{
-				SnapshotValid: true,
-				Snapshot:      s.Data,
-				SnapshotTerm:  s.Metadata.Term,
-				SnapshotIndex: s.Metadata.Index,
-			}:
-			case <-r.shutdown:
-				return
-			}
-			r.log.appliedTo(s.Metadata.Index)
-		}
-
-		for _, e := range ne {
-			if e.Index == 0 {
-				continue
-			}
-
-			select {
-			case r.applyCh <- ApplyMsg{
-				CommandValid: true,
-				Command:      e.Command,
-				CommandTerm:  e.Term,
-				CommandIndex: e.Index,
-			}:
-			case <-r.shutdown:
-				return
-			}
-			r.log.appliedTo(e.Index)
-		}
-	}
-}
-
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -744,14 +692,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartbeatTimeout: 1,
 		electionTimeout:  10,
 		votedFor:         None,
-		applyCh:          applyCh,
-		log:              newLog(),
 		nextIndex:        make([]int, len(peers)),
 		matchIndex:       make([]int, len(peers)),
 		msgHandlerCh:     make(chan msgHandler),
 		shutdown:         make(chan struct{}),
 	}
-	r.applyCond = sync.NewCond(&r.mu)
+	r.log = newLog(applyCh, sync.NewCond(&r.mu))
 	// Your initialization code here (2A, 2B, 2C).
 	r.becomeFollower(0, None)
 	// initialize from state persisted before a crash
@@ -759,7 +705,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go r.ticker()
-	go r.applier()
+	go r.log.applier()
 
 	return r
 }

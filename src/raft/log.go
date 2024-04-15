@@ -1,20 +1,46 @@
 package raft
 
+import (
+	"slices"
+	"sync"
+)
+
 type raftLog struct {
 	unstable
 	commitIndex int
 	lastApplied int
+
+	applyCh chan ApplyMsg
+	cond    *sync.Cond
+
+	done chan struct{}
 }
 
-func newLog() *raftLog {
-	return &raftLog{unstable: unstable{ent: []Entry{{}}}}
+func newLog(applyCh chan ApplyMsg, cond *sync.Cond) *raftLog {
+	return &raftLog{
+		unstable: unstable{ent: []Entry{{}}},
+		applyCh:  applyCh,
+		cond:     cond,
+		done:     make(chan struct{}),
+	}
+}
+
+func (l *raftLog) kill() {
+	close(l.done)
+	l.cond.Signal()
 }
 
 func (l *raftLog) readyToApply() bool { return l.lastApplied < l.commitIndex }
 
+func (l *raftLog) restoreSnapshot(s Snapshot) {
+	l.unstable.restoreSnapshot(s)
+	l.commitTo(s.Metadata.Index)
+}
+
 func (l *raftLog) commitTo(i int) bool {
 	if i > l.commitIndex && i <= l.lastIndex() {
 		l.commitIndex = i
+		l.cond.Signal()
 		return true
 	}
 
@@ -63,7 +89,6 @@ func (l *raftLog) maybeRestoreSnapshot(s Snapshot) bool {
 	}
 
 	l.restoreSnapshot(s)
-	l.commitTo(s.Metadata.Index)
 	return true
 }
 
@@ -106,4 +131,54 @@ func (l *raftLog) maybeAppend(term int, index int, commit int, entries []Entry) 
 
 	l.commitTo(min(commit, lastMatchIndex))
 	return lastMatchIndex, true
+}
+
+func (l *raftLog) applier() {
+	for {
+		select {
+		case <-l.done:
+			return
+		default:
+			l.cond.L.Lock()
+			for !l.readyToApply() {
+				l.cond.Wait()
+			}
+
+			s := l.nextSnapshot()
+			ne := slices.Clone(l.nextEntries())
+			l.cond.L.Unlock()
+
+			if s != nil {
+				select {
+				case l.applyCh <- ApplyMsg{
+					SnapshotValid: true,
+					Snapshot:      s.Data,
+					SnapshotTerm:  s.Metadata.Term,
+					SnapshotIndex: s.Metadata.Index,
+				}:
+				case <-l.done:
+					return
+				}
+				l.appliedTo(s.Metadata.Index)
+			}
+
+			for _, e := range ne {
+				if e.Index == 0 {
+					continue
+				}
+
+				select {
+				case l.applyCh <- ApplyMsg{
+					CommandValid: true,
+					Command:      e.Command,
+					CommandTerm:  e.Term,
+					CommandIndex: e.Index,
+				}:
+				case <-l.done:
+					return
+				}
+				l.appliedTo(e.Index)
+			}
+		}
+	}
 }
