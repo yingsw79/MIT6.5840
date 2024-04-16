@@ -187,6 +187,8 @@ func (r *Raft) Snapshot(index int, snapshot []byte) {
 	r.persist()
 }
 
+func (r *Raft) RaftStateSize() int { return r.persister.RaftStateSize() }
+
 func (r *Raft) handleRequestVote(_args any, _reply any) {
 	args := _args.(*RequestVoteArgs)
 	reply := _reply.(*RequestVoteReply)

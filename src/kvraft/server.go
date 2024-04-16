@@ -112,6 +112,23 @@ func (srv *KVServer) applySnapshot(data []byte) error {
 	return nil
 }
 
+func (srv *KVServer) maybeSnapshot(index int) {
+	if !srv.needSnapshot() {
+		return
+	}
+
+	s, err := srv.snapshot()
+	if err != nil {
+		panic(err)
+	}
+
+	go srv.rf.Snapshot(index, s)
+}
+
+func (srv *KVServer) needSnapshot() bool {
+	return srv.maxraftstate != -1 && srv.rf.RaftStateSize() >= srv.maxraftstate
+}
+
 func (srv *KVServer) snapshot() ([]byte, error) {
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
@@ -145,6 +162,8 @@ func (srv *KVServer) applier() {
 				if currentTerm, isLeader := srv.rf.GetState(); isLeader && msg.CommandTerm == currentTerm {
 					srv.notifier.notify(msg.CommandIndex, reply)
 				}
+
+				srv.maybeSnapshot(msg.CommandIndex)
 
 			} else if msg.SnapshotValid {
 				if srv.lastApplied >= msg.SnapshotIndex {
