@@ -86,6 +86,8 @@ func (u *unstable) append(entries ...Entry) {
 	case after == u.offset+int(len(u.ent)):
 		u.ent = append(u.ent, entries...)
 	case after <= u.offset:
+		log.Panicf("after: %d, u.offset: %d", after, u.offset)
+		
 		u.offset = after
 		u.ent = entries
 	default:

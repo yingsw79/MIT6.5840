@@ -71,6 +71,7 @@ func (l *raftLog) isUpToDate(term int, index int) bool {
 }
 
 func (l *raftLog) match(term int, index int) bool {
+	// TODO
 	if index > l.lastIndex() {
 		return false
 	}
@@ -94,7 +95,11 @@ func (l *raftLog) maybeRestoreSnapshot(s Snapshot) bool {
 
 func (l *raftLog) findConflictBackup(index int) FastBackup {
 	backup := FastBackup{None, None, None}
-	if index > l.lastIndex() {
+
+	if index < l.firstIndex() {
+		backup.XIndex = l.firstIndex()
+		return backup
+	} else if index > l.lastIndex() {
 		backup.XLen = l.lastIndex() + 1
 		return backup
 	}

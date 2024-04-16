@@ -540,7 +540,7 @@ func (r *Raft) updateTrackWithBackup(i int, backup FastBackup) {
 		if r.log.match(backup.XTerm, backup.XIndex) {
 			r.nextIndex[i]++
 		}
-	} else {
+	} else if backup.XLen != None {
 		r.nextIndex[i] = backup.XLen
 	}
 
