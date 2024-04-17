@@ -136,7 +136,7 @@ func (r *Raft) persist() {
 		CurrentTerm:      r.currentTerm,
 		VotedFor:         r.votedFor,
 		SnapshotMetadata: snapshotMetadata,
-		Log:              slices.Clone(r.log.entries()),
+		Log:              r.log.entries(),
 	}
 	if err := enc.Encode(&st); err != nil {
 		panic(err)
@@ -179,11 +179,14 @@ func (r *Raft) Snapshot(index int, snapshot []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	s := Snapshot{
+	if index < r.log.firstIndex() {
+		return
+	}
+
+	r.log.stableTo(Snapshot{
 		Metadata: SnapshotMetadata{Index: index, Term: r.log.term(index)},
 		Data:     snapshot,
-	}
-	r.log.stableTo(s)
+	})
 	r.persist()
 }
 
@@ -540,11 +543,11 @@ func (r *Raft) updateTrackWithBackup(i int, backup FastBackup) {
 		if r.log.match(backup.XTerm, backup.XIndex) {
 			r.nextIndex[i]++
 		}
+		r.sendAppendEntries(i)
 	} else if backup.XLen != None {
 		r.nextIndex[i] = backup.XLen
+		r.sendAppendEntries(i)
 	}
-
-	r.sendAppendEntries(i)
 }
 
 func (r *Raft) tickElection() {

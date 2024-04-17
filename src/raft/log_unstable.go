@@ -2,7 +2,6 @@ package raft
 
 import (
 	"log"
-	"slices"
 )
 
 type unstable struct {
@@ -21,8 +20,8 @@ func (u *unstable) firstIndex() int {
 func (u *unstable) snapshot() *Snapshot { return u.snap }
 
 func (u *unstable) lastIndex() int {
-	if l := len(u.ent); l != 0 {
-		return u.offset + int(l) - 1
+	if n := len(u.ent); n != 0 {
+		return u.offset + n - 1
 	}
 	if u.snap != nil {
 		return u.snap.Metadata.Index
@@ -48,23 +47,21 @@ func (u *unstable) term(i int) int {
 }
 
 func (u *unstable) stableTo(s Snapshot) {
-	if s.Metadata.Index < u.offset {
-		return
-	}
-
 	if s.Metadata.Index < u.lastIndex() {
 		u.ent = u.entriesFrom(s.Metadata.Index + 1)
 		u.offset = s.Metadata.Index + 1
-		u.shrinkEntries()
+		u.shrinkEntriesArray()
 		u.snap = &s
 	} else {
 		u.restoreSnapshot(s)
 	}
 }
 
-func (u *unstable) shrinkEntries() {
-	if len(u.ent)*2 < cap(u.ent) {
-		u.ent = slices.Clone(u.ent)
+func (u *unstable) shrinkEntriesArray() {
+	if n := len(u.ent); n*2 < cap(u.ent) {
+		newEnt := make([]Entry, n)
+		copy(newEnt, u.ent)
+		u.ent = newEnt
 	}
 }
 
@@ -76,43 +73,40 @@ func (u *unstable) restoreSnapshot(s Snapshot) {
 	u.snap = &s
 }
 
-func (u *unstable) append(entries ...Entry) {
+func (u *unstable) append(entries ...Entry) { u.ent = append(u.ent, entries...) }
+
+func (u *unstable) truncateAndAppend(entries ...Entry) {
 	if len(entries) == 0 {
 		return
 	}
 
-	after := entries[0].Index
+	i := entries[0].Index
 	switch {
-	case after == u.offset+int(len(u.ent)):
-		u.ent = append(u.ent, entries...)
-	case after <= u.offset:
-		log.Panicf("after: %d, u.offset: %d", after, u.offset)
-		
-		u.offset = after
+	case i == u.offset+int(len(u.ent)):
+		u.append(entries...)
+	case i == u.offset:
+		u.offset = i
 		u.ent = entries
 	default:
-		u.ent = append([]Entry{}, u.slice(u.offset, after)...)
-		u.ent = append(u.ent, entries...)
+		u.ent = append(u.slice(u.offset, i), entries...)
 	}
 }
 
-func (u *unstable) slice(lo int, hi int) []Entry {
-	u.mustCheckOutOfBounds(lo, hi)
-	return u.ent[lo-u.offset : hi-u.offset]
+func (u *unstable) slice(l, r int) []Entry {
+	u.mustCheckOutOfBounds(l, r)
+	return u.ent[l-u.offset : r-u.offset]
 }
 
-func (u *unstable) entriesFrom(i int) []Entry {
-	return u.slice(i, u.lastIndex()+1)
-}
+func (u *unstable) entriesFrom(i int) []Entry { return u.slice(i, u.lastIndex()+1) }
 
 func (u *unstable) entries() []Entry { return u.entriesFrom(u.firstIndex()) }
 
-func (u *unstable) mustCheckOutOfBounds(lo, hi int) {
-	if lo > hi {
-		log.Panicf("invalid unstable.slice %d > %d", lo, hi)
+func (u *unstable) mustCheckOutOfBounds(l, r int) {
+	if l > r {
+		log.Panicf("invalid unstable.slice %d > %d", l, r)
 	}
 	upper := u.offset + int(len(u.ent))
-	if lo < u.offset || hi > upper {
-		log.Panicf("unstable.slice[%d,%d) out of bound [%d,%d]", lo, hi, u.offset, upper)
+	if l < u.offset || r > upper {
+		log.Panicf("unstable.slice[%d,%d) out of bound [%d,%d]", l, r, u.offset, upper)
 	}
 }

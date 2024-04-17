@@ -71,8 +71,7 @@ func (l *raftLog) isUpToDate(term int, index int) bool {
 }
 
 func (l *raftLog) match(term int, index int) bool {
-	// TODO
-	if index > l.lastIndex() {
+	if index < l.firstIndex()-1 || index > l.lastIndex() {
 		return false
 	}
 
@@ -97,7 +96,6 @@ func (l *raftLog) findConflictBackup(index int) FastBackup {
 	backup := FastBackup{None, None, None}
 
 	if index < l.firstIndex() {
-		backup.XIndex = l.firstIndex()
 		return backup
 	} else if index > l.lastIndex() {
 		backup.XLen = l.lastIndex() + 1
@@ -131,7 +129,7 @@ func (l *raftLog) maybeAppend(term int, index int, commit int, entries []Entry) 
 	lastMatchIndex := index + len(entries)
 	i := l.findConflictIndex(entries)
 	if i != None {
-		l.append(entries[i-index-1:]...)
+		l.truncateAndAppend(entries[i-index-1:]...)
 	}
 
 	l.commitTo(min(commit, lastMatchIndex))

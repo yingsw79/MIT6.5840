@@ -16,7 +16,6 @@ type Snapshot struct {
 }
 
 type KVServer struct {
-	// mu      sync.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
