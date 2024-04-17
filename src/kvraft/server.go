@@ -1,32 +1,21 @@
 package kvraft
 
 import (
+	"bytes"
+	"sync/atomic"
+	"time"
+
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
-	"log"
-	"sync"
-	"sync/atomic"
 )
 
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+type Snapshot struct {
+	StateMachine KVStateMachine
+	LastOps      LastOps
 }
 
 type KVServer struct {
-	mu      sync.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -35,15 +24,161 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	stateMachine KVStateMachine
+	cache        *cache
+	notifier     *notifier
+
+	lastApplied int
+
+	shutdown chan struct{}
 }
 
-
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+func (srv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	if v, ok := srv.cache.load(args.ClientId); ok && v.Seq >= args.Seq {
+		reply.Value, reply.Err = v.Value, v.Err
+		return
+	}
+
+	index, _, isLeader := srv.rf.Start(Op{ClientId: args.ClientId, Seq: args.Seq, Type: OpGet, Key: args.Key})
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	replyCh := srv.notifier.register(index)
+
+	select {
+	case r := <-replyCh:
+		reply.Value, reply.Err = r.Value, r.Err
+	case <-time.After(timeout):
+		reply.Err = ErrServerTimeout
+	case <-srv.shutdown:
+		reply.Err = ErrServerShutdown
+	}
+
+	go srv.notifier.unregister(index)
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+func (srv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	if v, ok := srv.cache.load(args.ClientId); ok && v.Seq >= args.Seq {
+		reply.Err = v.Err
+		return
+	}
+
+	index, _, isLeader := srv.rf.Start(Op(*args))
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	replyCh := srv.notifier.register(index)
+
+	select {
+	case r := <-replyCh:
+		reply.Err = r.Err
+	case <-time.After(timeout):
+		reply.Err = ErrServerTimeout
+	case <-srv.shutdown:
+		reply.Err = ErrServerShutdown
+	}
+
+	go srv.notifier.unregister(index)
+}
+
+func (srv *KVServer) applyCommand(op *Op) (reply Reply) {
+	switch op.Type {
+	case OpGet:
+		reply.Value, reply.Err = srv.stateMachine.Get(op.Key)
+	case OpPut:
+		reply.Err = srv.stateMachine.Put(op.Key, op.Value)
+	case OpAppend:
+		reply.Err = srv.stateMachine.Append(op.Key, op.Value)
+	}
+	return
+}
+
+func (srv *KVServer) applySnapshot(data []byte) error {
+	var snapshot Snapshot
+	dec := labgob.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&snapshot); err != nil {
+		return err
+	}
+
+	srv.stateMachine = snapshot.StateMachine
+	srv.cache.setLastOps(snapshot.LastOps)
+	return nil
+}
+
+func (srv *KVServer) maybeSnapshot(index int) {
+	if !srv.needSnapshot() {
+		return
+	}
+
+	s, err := srv.snapshot()
+	if err != nil {
+		panic(err)
+	}
+
+	go srv.rf.Snapshot(index, s)
+}
+
+func (srv *KVServer) needSnapshot() bool {
+	return srv.maxraftstate != -1 && srv.rf.RaftStateSize() >= srv.maxraftstate
+}
+
+func (srv *KVServer) snapshot() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buf)
+	snapshot := Snapshot{StateMachine: srv.stateMachine, LastOps: srv.cache.getLastOps()}
+	if err := enc.Encode(&snapshot); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+func (srv *KVServer) applier() {
+	for {
+		select {
+		case msg := <-srv.applyCh:
+			if msg.CommandValid {
+				if srv.lastApplied >= msg.CommandIndex {
+					continue
+				}
+
+				var reply Reply
+				op := msg.Command.(Op)
+				if v, ok := srv.cache.load(op.ClientId); ok && v.Seq >= op.Seq {
+					reply.Value, reply.Err = v.Value, v.Err
+				} else {
+					reply = srv.applyCommand(&op)
+					srv.cache.store(op.ClientId, OpContext{Seq: op.Seq, Reply: reply})
+				}
+				srv.lastApplied = msg.CommandIndex
+
+				if currentTerm, isLeader := srv.rf.GetState(); isLeader && msg.CommandTerm == currentTerm {
+					srv.notifier.notify(msg.CommandIndex, reply)
+				}
+
+				srv.maybeSnapshot(msg.CommandIndex)
+
+			} else if msg.SnapshotValid {
+				if srv.lastApplied >= msg.SnapshotIndex {
+					continue
+				}
+
+				if err := srv.applySnapshot(msg.Snapshot); err != nil {
+					panic(err)
+				}
+
+				srv.lastApplied = msg.SnapshotIndex
+			}
+		case <-srv.shutdown:
+			return
+		}
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -54,14 +189,19 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // code to Kill(). you're not required to do anything
 // about this, but it may be convenient (for example)
 // to suppress debug output from a Kill()ed instance.
-func (kv *KVServer) Kill() {
-	atomic.StoreInt32(&kv.dead, 1)
-	kv.rf.Kill()
+func (srv *KVServer) Kill() {
+	if srv.killed() {
+		return
+	}
+
+	atomic.StoreInt32(&srv.dead, 1)
+	srv.rf.Kill()
 	// Your code here, if desired.
+	close(srv.shutdown)
 }
 
-func (kv *KVServer) killed() bool {
-	z := atomic.LoadInt32(&kv.dead)
+func (srv *KVServer) killed() bool {
+	z := atomic.LoadInt32(&srv.dead)
 	return z == 1
 }
 
@@ -81,17 +221,22 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-
-	kv := new(KVServer)
-	kv.me = me
-	kv.maxraftstate = maxraftstate
+	labgob.Register(MemoryKV{})
 
 	// You may need initialization code here.
+	applyCh := make(chan raft.ApplyMsg)
+	srv := &KVServer{
+		me:           me,
+		maxraftstate: maxraftstate,
+		applyCh:      applyCh,
+		rf:           raft.Make(servers, me, persister, applyCh),
+		stateMachine: NewMemoryKV(),
+		cache:        newCache(),
+		notifier:     newNotifier(),
+		shutdown:     make(chan struct{}),
+	}
 
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	go srv.applier()
 
-	// You may need initialization code here.
-
-	return kv
+	return srv
 }
