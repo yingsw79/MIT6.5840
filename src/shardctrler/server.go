@@ -1,11 +1,12 @@
 package shardctrler
 
+import (
+	"sync"
 
-import "6.5840/raft"
-import "6.5840/labrpc"
-import "sync"
-import "6.5840/labgob"
-
+	"6.5840/labgob"
+	"6.5840/labrpc"
+	"6.5840/raft"
+)
 
 type ShardCtrler struct {
 	mu      sync.Mutex
@@ -15,14 +16,31 @@ type ShardCtrler struct {
 
 	// Your data here.
 
-	configs []Config // indexed by config num
+	stateMachine ConfigStateMachine
+	lastApplied  int
+
+	shutdown chan struct{}
 }
 
+type OpType int
+
+const (
+	OpJoin OpType = iota
+	OpLeave
+	OpMove
+	OpQuery
+)
 
 type Op struct {
 	// Your data here.
+	ClientId   int64
+	Seq        int
+	Type       OpType
+	Servers    map[int][]string // Join
+	GIDs       []int            // Leave
+	Shard, GID int              // Move
+	Num        int              // Query
 }
-
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
@@ -39,7 +57,6 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
 }
-
 
 // the tester calls Kill() when a ShardCtrler instance won't
 // be needed again. you are not required to do anything
@@ -60,15 +77,16 @@ func (sc *ShardCtrler) Raft() *raft.Raft {
 // form the fault-tolerant shardctrler service.
 // me is the index of the current server in servers[].
 func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister) *ShardCtrler {
-	sc := new(ShardCtrler)
-	sc.me = me
-
-	sc.configs = make([]Config, 1)
-	sc.configs[0].Groups = map[int][]string{}
-
 	labgob.Register(Op{})
-	sc.applyCh = make(chan raft.ApplyMsg)
-	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
+
+	applyCh := make(chan raft.ApplyMsg)
+	sc := &ShardCtrler{
+		me:           me,
+		applyCh:      applyCh,
+		rf:           raft.Make(servers, me, persister, applyCh),
+		stateMachine: NewMemoryConfigStateMachine(),
+		shutdown:     make(chan struct{}),
+	}
 
 	// Your code here.
 
