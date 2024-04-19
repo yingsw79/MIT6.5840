@@ -8,8 +8,7 @@ import (
 )
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers  []*labrpc.ClientEnd
 	leaderId int
 	clientId int64
 	seq      int
@@ -23,67 +22,37 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	// You'll have to add code here.
 	return &Clerk{
 		servers:  servers,
 		clientId: nrand(),
 	}
 }
 
-// fetch the current value for a key.
-// returns "" if the key does not exist.
-// keeps trying forever in the face of all other errors.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
+func (ck *Clerk) rpc(args Op) string {
+	for {
+		var reply Reply
+		if !ck.servers[ck.leaderId].Call("KVServer.HandleRPC", args, &reply) ||
+			reply.Err == ErrWrongLeader || reply.Err == ErrServerTimeout || reply.Err == ErrServerShutdown {
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			continue
+		}
+
+		ck.seq++
+		if v, ok := reply.Value.(string); ok {
+			return v
+		}
+		return ""
+	}
+}
+
 func (ck *Clerk) Get(key string) string {
-	// You will have to modify this function.
-	args := GetArgs{Key: key, ClientId: ck.clientId, Seq: ck.seq}
-	for {
-		var reply GetReply
-		if !ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply) ||
-			reply.Err == ErrWrongLeader || reply.Err == ErrServerTimeout || reply.Err == ErrServerShutdown {
-			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
-			continue
-		}
-
-		ck.seq++
-		return reply.Value
-	}
+	return ck.rpc(Op{Key: key, Type: OpGet, ClientId: ck.clientId, Seq: ck.seq})
 }
 
-// shared by Put and Append.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, opType OpType) {
-	// You will have to modify this function.
-	args := PutAppendArgs{Key: key, Value: value, Type: opType, ClientId: ck.clientId, Seq: ck.seq}
-	for {
-		var reply PutAppendReply
-		if !ck.servers[ck.leaderId].Call("KVServer.PutAppend", &args, &reply) ||
-			reply.Err == ErrWrongLeader || reply.Err == ErrServerTimeout || reply.Err == ErrServerShutdown {
-			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
-			continue
-		}
-
-		ck.seq++
-		return
-	}
+	ck.rpc(Op{Key: key, Value: value, Type: opType, ClientId: ck.clientId, Seq: ck.seq})
 }
 
-func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, OpPut)
-}
+func (ck *Clerk) Put(key string, value string) { ck.PutAppend(key, value, OpPut) }
 
-func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, OpAppend)
-}
+func (ck *Clerk) Append(key string, value string) { ck.PutAppend(key, value, OpAppend) }

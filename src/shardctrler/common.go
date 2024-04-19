@@ -29,49 +29,28 @@ type Config struct {
 }
 
 const (
-	OK                = "OK"
-	ErrNoConfig       = "ErrNoConfig"
-	ErrWrongLeader    = "ErrWrongLeader"
-	ErrServerTimeout  = "ErrServerTimeout"
-	ErrServerShutdown = "ErrServerShutdown"
+	ErrNoConfig = "ErrNoConfig"
 )
 
-type Err string
+type OpType int
 
-type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+const (
+	OpJoin OpType = iota
+	OpLeave
+	OpMove
+	OpQuery
+)
+
+type Op struct {
+	ClientId int64
+	Seq      int
+
+	Type       OpType
+	Servers    map[int][]string // Join
+	GIDs       []int            // Leave
+	Shard, GID int              // Move
+	Num        int              // Query
 }
 
-type JoinReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type LeaveArgs struct {
-	GIDs []int
-}
-
-type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type MoveArgs struct {
-	Shard int
-	GID   int
-}
-
-type MoveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type QueryArgs struct {
-	Num int // desired config number
-}
-
-type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
-}
+func (op Op) GetClientId() int64 { return op.ClientId }
+func (op Op) GetSeq() int        { return op.Seq }

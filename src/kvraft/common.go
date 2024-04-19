@@ -22,34 +22,26 @@ const (
 	OpAppend
 )
 
+type IOp interface {
+	GetClientId() int64
+	GetSeq() int
+}
+
+type StateMachine interface{ Apply(IOp) Reply }
+
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 	ClientId int64
 	Seq      int
-	Type     OpType
-	Key      string
-	Value    string
+
+	Type  OpType
+	Key   string
+	Value string
 }
 
-// Put or Append
-type PutAppendArgs Op
-
-type PutAppendReply struct {
-	Err Err
-}
-
-type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
-	ClientId int64
-	Seq      int
-}
-
-type GetReply Reply
+func (op Op) GetClientId() int64 { return op.ClientId }
+func (op Op) GetSeq() int        { return op.Seq }
 
 type Reply struct {
 	Err   Err
-	Value string
+	Value any
 }

@@ -12,14 +12,14 @@ type OpContext struct {
 
 type LastOps map[int64]OpContext
 
-type cache struct {
+type Cache struct {
 	mu      sync.RWMutex
 	lastOps LastOps
 }
 
-func newCache() *cache { return &cache{lastOps: LastOps{}} }
+func NewCache() *Cache { return &Cache{lastOps: LastOps{}} }
 
-func (c *cache) load(k int64) (OpContext, bool) {
+func (c *Cache) Load(k int64) (OpContext, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -27,35 +27,35 @@ func (c *cache) load(k int64) (OpContext, bool) {
 	return v, ok
 }
 
-func (c *cache) store(k int64, v OpContext) {
+func (c *Cache) Store(k int64, v OpContext) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.lastOps[k] = v
 }
 
-func (c *cache) getLastOps() LastOps {
+func (c *Cache) LastOps() LastOps {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	return c.lastOps
 }
 
-func (c *cache) setLastOps(lastOps LastOps) {
+func (c *Cache) SetLastOps(lastOps LastOps) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.lastOps = lastOps
 }
 
-type notifier struct {
+type Notifier struct {
 	mu        sync.Mutex
 	notifyMap map[int]chan Reply
 }
 
-func newNotifier() *notifier { return &notifier{notifyMap: make(map[int]chan Reply)} }
+func NewNotifier() *Notifier { return &Notifier{notifyMap: make(map[int]chan Reply)} }
 
-func (n *notifier) register(index int) <-chan Reply {
+func (n *Notifier) Register(index int) <-chan Reply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -64,14 +64,14 @@ func (n *notifier) register(index int) <-chan Reply {
 	return ch
 }
 
-func (n *notifier) unregister(index int) {
+func (n *Notifier) Unregister(index int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	delete(n.notifyMap, index)
 }
 
-func (n *notifier) notify(index int, reply Reply) {
+func (n *Notifier) Notify(index int, reply Reply) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 

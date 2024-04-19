@@ -1,17 +1,20 @@
 package shardctrler
 
-import "6.5840/labrpc"
-import "6.5840/raft"
-import "testing"
-import "os"
+import (
+	"os"
+	"testing"
 
-// import "log"
-import crand "crypto/rand"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "time"
+	"6.5840/labrpc"
+	"6.5840/raft"
+
+	// import "log"
+	crand "crypto/rand"
+	"encoding/base64"
+	"math/rand"
+	"runtime"
+	"sync"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -289,7 +292,7 @@ func (cfg *config) StartServer(i int) {
 	cfg.servers[i] = StartServer(ends, i, cfg.saved[i])
 
 	kvsvc := labrpc.MakeService(cfg.servers[i])
-	rfsvc := labrpc.MakeService(cfg.servers[i].rf)
+	rfsvc := labrpc.MakeService(cfg.servers[i].Rf)
 	srv := labrpc.MakeServer()
 	srv.AddService(kvsvc)
 	srv.AddService(rfsvc)
@@ -302,7 +305,7 @@ func (cfg *config) Leader() (bool, int) {
 
 	for i := 0; i < cfg.n; i++ {
 		if cfg.servers[i] != nil {
-			_, is_leader := cfg.servers[i].rf.GetState()
+			_, is_leader := cfg.servers[i].Rf.GetState()
 			if is_leader {
 				return true, i
 			}
