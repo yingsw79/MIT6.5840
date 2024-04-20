@@ -1,16 +1,9 @@
 package shardctrler
 
 import (
-	"strconv"
-	"strings"
+	"slices"
 
 	"6.5840/kvraft"
-)
-
-const (
-	StrGroup = "Group"
-	StrShard = "Shard"
-	Sep      = "#"
 )
 
 var DummyConfig = Config{Groups: make(map[int][]string)}
@@ -24,14 +17,12 @@ type ConfigStateMachine interface {
 }
 
 type MemoryConfigStateMachine struct {
-	Consistent *Consistent
-	Configs    []Config
+	Configs []Config
 }
 
 func NewMemoryConfigStateMachine() *MemoryConfigStateMachine {
 	return &MemoryConfigStateMachine{
-		Consistent: NewConsistent(),
-		Configs:    []Config{DummyConfig},
+		Configs: []Config{DummyConfig},
 	}
 }
 
@@ -40,20 +31,16 @@ func (m *MemoryConfigStateMachine) Join(servers map[int][]string) kvraft.Err {
 	newCfg := Config{Num: len(m.Configs), Shards: lastCfg.Shards, Groups: deepCopy(lastCfg.Groups)}
 
 	for k, v := range servers {
-		if _, ok := newCfg.Groups[k]; !ok {
-			newCfg.Groups[k] = v
-			m.Consistent.Add(wrapGroup(k))
-		}
+		newCfg.Groups[k] = v
+	}
+	g := g2s(newCfg.Shards[:], newCfg.Groups)
+	allocShards := []int{}
+	if v, ok := g[0]; ok {
+		allocShards = append(allocShards, v...)
+		delete(g, 0)
 	}
 
-	for i := range newCfg.Shards {
-		if s, err := m.Consistent.Get(wrapShard(i)); err == nil {
-			newCfg.Shards[i] = unwrap(s)
-		} else {
-			newCfg.Shards[i] = 0
-		}
-	}
-
+	newCfg.Shards = balance(g, allocShards)
 	m.Configs = append(m.Configs, newCfg)
 	return kvraft.OK
 }
@@ -62,21 +49,21 @@ func (m *MemoryConfigStateMachine) Leave(gids []int) kvraft.Err {
 	lastCfg := m.Configs[len(m.Configs)-1]
 	newCfg := Config{Num: len(m.Configs), Shards: lastCfg.Shards, Groups: deepCopy(lastCfg.Groups)}
 
+	g := g2s(newCfg.Shards[:], newCfg.Groups)
+	allocShards := []int{}
 	for _, v := range gids {
-		if _, ok := newCfg.Groups[v]; ok {
-			delete(newCfg.Groups, v)
-			m.Consistent.Remove(wrapGroup(v))
+		delete(newCfg.Groups, v)
+		if s, ok := g[v]; ok {
+			allocShards = append(allocShards, s...)
+			delete(g, v)
 		}
 	}
-
-	for i := range newCfg.Shards {
-		if s, err := m.Consistent.Get(wrapShard(i)); err == nil {
-			newCfg.Shards[i] = unwrap(s)
-		} else {
-			newCfg.Shards[i] = 0
-		}
+	if v, ok := g[0]; ok {
+		allocShards = append(allocShards, v...)
+		delete(g, 0)
 	}
 
+	newCfg.Shards = balance(g, allocShards)
 	m.Configs = append(m.Configs, newCfg)
 	return kvraft.OK
 }
@@ -97,7 +84,7 @@ func (m *MemoryConfigStateMachine) Query(num int) (Config, kvraft.Err) {
 	} else if num >= 0 {
 		return m.Configs[num], kvraft.OK
 	} else {
-		return m.Configs[0], ErrNoConfig
+		return DummyConfig, ErrNoConfig
 	}
 }
 
@@ -123,12 +110,62 @@ func deepCopy(original map[int][]string) map[int][]string {
 	return copied
 }
 
-func wrapGroup(i int) string { return StrGroup + Sep + strconv.Itoa(i) }
+func g2s(shards []int, groups map[int][]string) map[int][]int {
+	mp := make(map[int][]int, len(groups))
+	for k := range groups {
+		mp[k] = []int{}
+	}
+	for i, v := range shards {
+		mp[v] = append(mp[v], i)
+	}
+	return mp
+}
 
-func wrapShard(i int) string { return StrShard + Sep + strconv.Itoa(i) }
+func balance(g map[int][]int, allocShards []int) (res [NShards]int) {
+	n := len(g)
+	if len(g) < 1 {
+		return
+	}
 
-func unwrap(s string) int {
-	ss := strings.Split(s, Sep)
-	i, _ := strconv.Atoi(ss[len(ss)-1])
-	return i
+	x, y := NShards/n, NShards%n
+	z := x
+	if y > 0 {
+		z++
+	}
+
+	groups := []int{}
+	for k := range g {
+		groups = append(groups, k)
+	}
+	slices.Sort(groups) // deterministic
+	slices.SortFunc(groups, func(a, b int) int { return len(g[b]) - len(g[a]) })
+
+	for i, v := range groups {
+		t := x
+		if i < y {
+			t = z
+		}
+		if s := g[v]; len(s) > t {
+			g[v] = s[:t]
+			allocShards = append(allocShards, s[t:]...)
+		}
+	}
+
+	for i, v := range groups {
+		t := x
+		if i < y {
+			t = z
+		}
+		if n := len(g[v]); n < t {
+			g[v] = append(g[v], allocShards[:t-n]...)
+			allocShards = allocShards[t-n:]
+		}
+	}
+
+	for k, shards := range g {
+		for _, v := range shards {
+			res[v] = k
+		}
+	}
+	return
 }

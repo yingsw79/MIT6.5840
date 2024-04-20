@@ -32,7 +32,8 @@ func (ck *Clerk) rpc(args Op) string {
 	for {
 		var reply Reply
 		if !ck.servers[ck.leaderId].Call("KVServer.HandleRPC", args, &reply) ||
-			reply.Err == ErrWrongLeader || reply.Err == ErrServerTimeout || reply.Err == ErrServerShutdown {
+			reply.Err == ErrWrongLeader || reply.Err == ErrServerTimeout ||
+			reply.Err == ErrServerShutdown {
 			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
 			continue
 		}
