@@ -8,10 +8,6 @@ import (
 
 type KVServer struct{ *Server }
 
-// func (srv *KVServer) Get(args IOp, reply *Reply) { srv.HandleRPC(args, reply) }
-
-// func (srv *KVServer) PutAppend(args IOp, reply *Reply) { srv.HandleRPC(args, reply) }
-
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -28,7 +24,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-	labgob.Register(MemoryKV{})
+	labgob.Register(MemoryKVStateMachine{})
 
-	return &KVServer{Server: NewServer(servers, me, persister, maxraftstate, NewMemoryKV())}
+	return &KVServer{Server: NewServer(servers, me, persister, maxraftstate, NewMemoryKVStateMachine())}
 }

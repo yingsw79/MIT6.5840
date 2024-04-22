@@ -16,14 +16,10 @@ type ConfigStateMachine interface {
 	Query(int) (Config, kvraft.Err)
 }
 
-type MemoryConfigStateMachine struct {
-	Configs []Config
-}
+type MemoryConfigStateMachine struct{ Configs []Config }
 
 func NewMemoryConfigStateMachine() *MemoryConfigStateMachine {
-	return &MemoryConfigStateMachine{
-		Configs: []Config{DummyConfig},
-	}
+	return &MemoryConfigStateMachine{Configs: []Config{DummyConfig}}
 }
 
 func (m *MemoryConfigStateMachine) Join(servers map[int][]string) kvraft.Err {
@@ -123,7 +119,7 @@ func g2s(shards []int, groups map[int][]string) map[int][]int {
 
 func balance(g map[int][]int, allocShards []int) (res [NShards]int) {
 	n := len(g)
-	if len(g) < 1 {
+	if n < 1 {
 		return
 	}
 

@@ -7,17 +7,7 @@ import (
 	"6.5840/raft"
 )
 
-type ShardCtrler struct {
-	*kvraft.Server
-}
-
-// func (sc *ShardCtrler) Join(args kvraft.IOp, reply *kvraft.Reply) {}
-
-// func (sc *ShardCtrler) Leave(args kvraft.IOp, reply *kvraft.Reply) {}
-
-// func (sc *ShardCtrler) Move(args kvraft.IOp, reply *kvraft.Reply) {}
-
-// func (sc *ShardCtrler) Query(args kvraft.IOp, reply *kvraft.Reply) {}
+type ShardCtrler struct{ *kvraft.Server }
 
 // needed by shardkv tester
 func (sc *ShardCtrler) Raft() *raft.Raft { return sc.Rf }

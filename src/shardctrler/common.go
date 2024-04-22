@@ -28,9 +28,7 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
-const (
-	ErrNoConfig = "ErrNoConfig"
-)
+const ErrNoConfig = "ErrNoConfig"
 
 type OpType int
 

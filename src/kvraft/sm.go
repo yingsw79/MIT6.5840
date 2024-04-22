@@ -7,11 +7,11 @@ type KVStateMachine interface {
 	Append(string, string) Err
 }
 
-type MemoryKV map[string]string
+type MemoryKVStateMachine map[string]string
 
-func NewMemoryKV() MemoryKV { return MemoryKV{} }
+func NewMemoryKVStateMachine() MemoryKVStateMachine { return MemoryKVStateMachine{} }
 
-func (m MemoryKV) Get(k string) (string, Err) {
+func (m MemoryKVStateMachine) Get(k string) (string, Err) {
 	if v, ok := m[k]; ok {
 		return v, OK
 	}
@@ -19,17 +19,17 @@ func (m MemoryKV) Get(k string) (string, Err) {
 	return "", ErrNoKey
 }
 
-func (m MemoryKV) Put(k, v string) Err {
+func (m MemoryKVStateMachine) Put(k, v string) Err {
 	m[k] = v
 	return OK
 }
 
-func (m MemoryKV) Append(k, v string) Err {
+func (m MemoryKVStateMachine) Append(k, v string) Err {
 	m[k] += v
 	return OK
 }
 
-func (m MemoryKV) Apply(iop IOp) (reply Reply) {
+func (m MemoryKVStateMachine) Apply(iop IOp) (reply Reply) {
 	switch op := iop.(Op); op.Type {
 	case OpGet:
 		reply.Value, reply.Err = m.Get(op.Key)

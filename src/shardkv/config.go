@@ -1,21 +1,24 @@
 package shardkv
 
-import "6.5840/shardctrler"
-import "6.5840/labrpc"
-import "testing"
-import "os"
+import (
+	"os"
+	"testing"
 
-// import "log"
-import crand "crypto/rand"
-import "math/big"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "6.5840/raft"
-import "strconv"
-import "fmt"
-import "time"
+	// import "log"
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"math/rand"
+	"runtime"
+	"strconv"
+	"sync"
+	"time"
+
+	"6.5840/labrpc"
+	"6.5840/raft"
+	"6.5840/shardctrler"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -254,7 +257,7 @@ func (cfg *config) StartServer(gi int, i int) {
 		})
 
 	kvsvc := labrpc.MakeService(gg.servers[i])
-	rfsvc := labrpc.MakeService(gg.servers[i].rf)
+	rfsvc := labrpc.MakeService(gg.servers[i].Rf)
 	srv := labrpc.MakeServer()
 	srv.AddService(kvsvc)
 	srv.AddService(rfsvc)
