@@ -1,7 +1,6 @@
 package kvraft
 
 import (
-	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
 )
@@ -23,8 +22,5 @@ type KVServer struct{ *Server }
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
-	labgob.Register(MemoryKVStateMachine{})
-
 	return &KVServer{Server: NewServer(servers, me, persister, maxraftstate, NewMemoryKVStateMachine())}
 }

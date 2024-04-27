@@ -1,10 +1,34 @@
 package shardctrler
 
 import (
+	"bytes"
 	"slices"
 
 	"6.5840/kvraft"
+	"6.5840/labgob"
 )
+
+type OpType int
+
+const (
+	OpJoin OpType = iota
+	OpLeave
+	OpMove
+	OpQuery
+)
+
+type Op struct {
+	Type       OpType
+	Servers    map[int][]string // Join
+	GIDs       []int            // Leave
+	Shard, GID int              // Move
+	Num        int              // Query
+}
+
+type Snapshot struct {
+	Configs []Config
+	LastOps kvraft.LastOps
+}
 
 var DummyConfig = Config{Groups: make(map[int][]string)}
 
@@ -16,10 +40,15 @@ type ConfigStateMachine interface {
 	Query(int) (Config, kvraft.Err)
 }
 
-type MemoryConfigStateMachine struct{ Configs []Config }
+type MemoryConfigStateMachine struct {
+	Configs []Config
+	Cache   *kvraft.Cache
+}
 
 func NewMemoryConfigStateMachine() *MemoryConfigStateMachine {
-	return &MemoryConfigStateMachine{Configs: []Config{DummyConfig}}
+	labgob.Register(Op{})
+	labgob.Register(Config{})
+	return &MemoryConfigStateMachine{Configs: []Config{DummyConfig}, Cache: kvraft.NewCache()}
 }
 
 func (m *MemoryConfigStateMachine) Join(servers map[int][]string) kvraft.Err {
@@ -84,8 +113,21 @@ func (m *MemoryConfigStateMachine) Query(num int) (Config, kvraft.Err) {
 	}
 }
 
-func (m *MemoryConfigStateMachine) Apply(iop kvraft.IOp) (reply kvraft.Reply) {
-	switch op := iop.(Op); op.Type {
+func (m *MemoryConfigStateMachine) IsDuplicate(clientId int64, seq int, reply *kvraft.Reply) bool {
+	return m.Cache.IsDuplicate(clientId, seq, reply)
+}
+
+func (m *MemoryConfigStateMachine) ApplyCommand(msg any, reply *kvraft.Reply) bool {
+	c, ok := msg.(kvraft.Command)
+	if !ok {
+		return false
+	}
+
+	if m.IsDuplicate(c.ClientId, c.Seq, reply) {
+		return true
+	}
+
+	switch op := c.Op.(Op); op.Type {
 	case OpJoin:
 		reply.Err = m.Join(op.Servers)
 	case OpLeave:
@@ -94,8 +136,33 @@ func (m *MemoryConfigStateMachine) Apply(iop kvraft.IOp) (reply kvraft.Reply) {
 		reply.Err = m.Move(op.Shard, op.GID)
 	case OpQuery:
 		reply.Value, reply.Err = m.Query(op.Num)
+	default:
+		return false
 	}
-	return
+	m.Cache.Store(c.ClientId, kvraft.OpContext{Seq: c.Seq, Reply: *reply})
+	return true
+}
+
+func (m *MemoryConfigStateMachine) Snapshot() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buf)
+	snapshot := Snapshot{Configs: m.Configs, LastOps: m.Cache.LastOps()}
+	if err := enc.Encode(&snapshot); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *MemoryConfigStateMachine) ApplySnapshot(data []byte) error {
+	var snapshot Snapshot
+	dec := labgob.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&snapshot); err != nil {
+		return err
+	}
+
+	m.Configs = snapshot.Configs
+	m.Cache.SetLastOps(snapshot.LastOps)
+	return nil
 }
 
 func deepCopy(original map[int][]string) map[int][]string {

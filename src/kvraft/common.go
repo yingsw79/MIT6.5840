@@ -14,34 +14,27 @@ const timeout = 500 * time.Millisecond
 
 type Err string
 
-type OpType int
-
-const (
-	OpGet OpType = iota
-	OpPut
-	OpAppend
-)
-
-type IOp interface {
-	GetClientId() int64
-	GetSeq() int
+type StateMachine interface {
+	ApplyCommand(any, *Reply) bool
+	ApplySnapshot([]byte) error
+	Snapshot() ([]byte, error)
+	IsDuplicate(int64, int, *Reply) bool
 }
 
-type StateMachine interface{ Apply(IOp) Reply }
-
-type Op struct {
+type Command struct {
 	ClientId int64
 	Seq      int
-
-	Type  OpType
-	Key   string
-	Value string
+	Op       any
 }
-
-func (op Op) GetClientId() int64 { return op.ClientId }
-func (op Op) GetSeq() int        { return op.Seq }
 
 type Reply struct {
 	Err   Err
 	Value any
 }
+
+type OpContext struct {
+	Seq int
+	Reply
+}
+
+type LastOps map[int64]OpContext

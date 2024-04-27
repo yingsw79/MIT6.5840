@@ -25,7 +25,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return &Clerk{servers: servers, clientId: nrand()}
 }
 
-func (ck *Clerk) rpc(args Op) string {
+func (ck *Clerk) rpc(args *Command) string {
 	for {
 		var reply Reply
 		if !ck.servers[ck.leaderId].Call("KVServer.HandleRPC", args, &reply) ||
@@ -44,11 +44,19 @@ func (ck *Clerk) rpc(args Op) string {
 }
 
 func (ck *Clerk) Get(key string) string {
-	return ck.rpc(Op{Key: key, Type: OpGet, ClientId: ck.clientId, Seq: ck.seq})
+	command := Command{
+		ClientId: ck.clientId, Seq: ck.seq,
+		Op: Op{Key: key, Type: OpGet},
+	}
+	return ck.rpc(&command)
 }
 
 func (ck *Clerk) PutAppend(key string, value string, opType OpType) {
-	ck.rpc(Op{Key: key, Value: value, Type: opType, ClientId: ck.clientId, Seq: ck.seq})
+	command := Command{
+		ClientId: ck.clientId, Seq: ck.seq,
+		Op: Op{Key: key, Value: value, Type: opType},
+	}
+	ck.rpc(&command)
 }
 
 func (ck *Clerk) Put(key string, value string) { ck.PutAppend(key, value, OpPut) }

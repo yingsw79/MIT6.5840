@@ -29,26 +29,3 @@ type Config struct {
 }
 
 const ErrNoConfig = "ErrNoConfig"
-
-type OpType int
-
-const (
-	OpJoin OpType = iota
-	OpLeave
-	OpMove
-	OpQuery
-)
-
-type Op struct {
-	ClientId int64
-	Seq      int
-
-	Type       OpType
-	Servers    map[int][]string // Join
-	GIDs       []int            // Leave
-	Shard, GID int              // Move
-	Num        int              // Query
-}
-
-func (op Op) GetClientId() int64 { return op.ClientId }
-func (op Op) GetSeq() int        { return op.Seq }
