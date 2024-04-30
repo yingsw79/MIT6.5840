@@ -5,45 +5,6 @@ import (
 	"time"
 )
 
-type Cache struct {
-	mu      sync.RWMutex
-	lastOps LastOps
-}
-
-func NewCache() *Cache { return &Cache{lastOps: LastOps{}} }
-
-func (c *Cache) Store(k int64, v OpContext) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastOps[k] = v
-}
-
-func (c *Cache) IsDuplicate(clientId int64, seq int, reply *Reply) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if v, ok := c.lastOps[clientId]; ok && v.Seq >= seq {
-		reply.Value, reply.Err = v.Value, v.Err
-		return true
-	}
-	return false
-}
-
-func (c *Cache) LastOps() LastOps {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.lastOps
-}
-
-func (c *Cache) SetLastOps(lastOps LastOps) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastOps = lastOps
-}
-
 type Notifier struct {
 	mu        sync.Mutex
 	notifyMap map[int]chan *Reply

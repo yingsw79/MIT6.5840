@@ -2,6 +2,7 @@ package kvraft
 
 import (
 	"bytes"
+	"sync"
 
 	"6.5840/labgob"
 )
@@ -20,11 +21,9 @@ type Op struct {
 	Value string
 }
 
-type KVStore map[string]string
-
-type Snapshot struct {
-	KV      KVStore
-	LastOps LastOps
+type OpContext struct {
+	Seq int
+	Reply
 }
 
 type KVStateMachine interface {
@@ -34,48 +33,73 @@ type KVStateMachine interface {
 	Append(string, string) Err
 }
 
-type MemoryKVStateMachine struct {
-	KV    KVStore
-	Cache *Cache
+type Cache map[int64]OpContext
+
+func NewCache() Cache { return Cache{} }
+
+func (c Cache) Store(k int64, v OpContext) { c[k] = v }
+
+func (c Cache) Check(args *Args, reply *Reply) bool {
+	if v, ok := c[args.ClientId]; ok && v.Seq >= args.Seq {
+		reply.Value, reply.Err = v.Value, v.Err
+		return false
+	}
+	return true
 }
 
-func NewMemoryKVStateMachine() *MemoryKVStateMachine {
-	labgob.Register(Op{})
-	return &MemoryKVStateMachine{KV: make(map[string]string), Cache: NewCache()}
-}
+type KVStore map[string]string
 
-func (m *MemoryKVStateMachine) Get(k string) (string, Err) {
-	if v, ok := m.KV[k]; ok {
+func NewKVStore() KVStore { return KVStore{} }
+
+func (kv KVStore) Get(k string) (string, Err) {
+	if v, ok := kv[k]; ok {
 		return v, OK
 	}
 	return "", ErrNoKey
 }
 
-func (m *MemoryKVStateMachine) Put(k, v string) Err {
-	m.KV[k] = v
+func (kv KVStore) Put(k, v string) Err {
+	kv[k] = v
 	return OK
 }
 
-func (m *MemoryKVStateMachine) Append(k, v string) Err {
-	m.KV[k] += v
+func (kv KVStore) Append(k, v string) Err {
+	kv[k] += v
 	return OK
 }
 
-func (m *MemoryKVStateMachine) IsDuplicate(clientId int64, seq int, reply *Reply) bool {
-	return m.Cache.IsDuplicate(clientId, seq, reply)
+type MemoryKVStateMachine struct {
+	mu sync.Mutex
+	KVStore
+	Cache Cache
+}
+
+func NewMemoryKVStateMachine() *MemoryKVStateMachine {
+	labgob.Register(Op{})
+	return &MemoryKVStateMachine{KVStore: NewKVStore(), Cache: NewCache()}
+}
+
+func (m *MemoryKVStateMachine) Check(args *Args, reply *Reply) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.Cache.Check(args, reply)
 }
 
 func (m *MemoryKVStateMachine) ApplyCommand(msg any, reply *Reply) bool {
-	c, ok := msg.(Command)
+	args, ok := msg.(Args)
 	if !ok {
 		return false
 	}
 
-	if m.IsDuplicate(c.ClientId, c.Seq, reply) {
-		return true
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.Cache.Check(&args, reply) {
+		return false
 	}
 
-	switch op := c.Op.(Op); op.Type {
+	switch op := args.Op.(Op); op.Type {
 	case OpGet:
 		reply.Value, reply.Err = m.Get(op.Key)
 	case OpPut:
@@ -85,28 +109,36 @@ func (m *MemoryKVStateMachine) ApplyCommand(msg any, reply *Reply) bool {
 	default:
 		return false
 	}
-	m.Cache.Store(c.ClientId, OpContext{Seq: c.Seq, Reply: *reply})
+
+	m.Cache.Store(args.ClientId, OpContext{Seq: args.Seq, Reply: *reply})
 	return true
 }
 
 func (m *MemoryKVStateMachine) Snapshot() ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
-	snapshot := Snapshot{KV: m.KV, LastOps: m.Cache.LastOps()}
-	if err := enc.Encode(&snapshot); err != nil {
+	if err := enc.Encode(m.KVStore); err != nil {
+		return nil, err
+	}
+	if err := enc.Encode(m.Cache); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
 func (m *MemoryKVStateMachine) ApplySnapshot(data []byte) error {
-	var snapshot Snapshot
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	dec := labgob.NewDecoder(bytes.NewReader(data))
-	if err := dec.Decode(&snapshot); err != nil {
+	if err := dec.Decode(&m.KVStore); err != nil {
 		return err
 	}
-
-	m.KV = snapshot.KV
-	m.Cache.SetLastOps(snapshot.LastOps)
+	if err := dec.Decode(&m.Cache); err != nil {
+		return err
+	}
 	return nil
 }

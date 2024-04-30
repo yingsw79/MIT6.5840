@@ -18,23 +18,17 @@ type StateMachine interface {
 	ApplyCommand(any, *Reply) bool
 	ApplySnapshot([]byte) error
 	Snapshot() ([]byte, error)
-	IsDuplicate(int64, int, *Reply) bool
+	Check(*Args, *Reply) bool
 }
 
-type Command struct {
+type Args struct {
 	ClientId int64
 	Seq      int
-	Op       any
+
+	Op any
 }
 
 type Reply struct {
 	Err   Err
 	Value any
 }
-
-type OpContext struct {
-	Seq int
-	Reply
-}
-
-type LastOps map[int64]OpContext

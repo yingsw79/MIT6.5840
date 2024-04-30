@@ -1,10 +1,13 @@
 package shardkv
 
 import (
+	"sync"
+
 	"6.5840/kvraft"
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"6.5840/shardctrler"
 )
 
 type Op struct {
@@ -14,26 +17,26 @@ type Op struct {
 }
 
 type ShardKV struct {
-	// mu           sync.Mutex
+	mu sync.Mutex
 	// me           int
 	// rf           *raft.Raft
 	// applyCh      chan raft.ApplyMsg
 	make_end func(string) *labrpc.ClientEnd
 	gid      int
 	ctrlers  []*labrpc.ClientEnd
+	sc       *shardctrler.Clerk
 	// maxraftstate int // snapshot if log grows this big
+	// shards map[int]*Shard
 
-	*kvraft.KVServer
+	// curConfig, wlastConfig shardctrler.Config
+	// sm ShardKVStateMachine
+	*kvraft.Server
 	// Your definitions here.
 }
 
-// func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-// 	// Your code here.
-// }
+func (srv *ShardKV) UpdateConfig() {
 
-// func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-// 	// Your code here.
-// }
+}
 
 // the tester calls Kill() when a ShardKV instance won't
 // be needed again. you are not required to do anything

@@ -30,7 +30,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return &Clerk{servers: servers, clientId: nrand()}
 }
 
-func (ck *Clerk) rpc(args *kvraft.Command) Config {
+func (ck *Clerk) rpc(args *kvraft.Args) Config {
 	for {
 		var reply kvraft.Reply
 		if !ck.servers[ck.leaderId].Call("ShardCtrler.HandleRPC", args, &reply) ||
@@ -49,7 +49,7 @@ func (ck *Clerk) rpc(args *kvraft.Command) Config {
 }
 
 func (ck *Clerk) Query(num int) Config {
-	command := kvraft.Command{
+	command := kvraft.Args{
 		ClientId: ck.clientId, Seq: ck.seq,
 		Op: Op{Num: num, Type: OpQuery},
 	}
@@ -57,7 +57,7 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	command := kvraft.Command{
+	command := kvraft.Args{
 		ClientId: ck.clientId, Seq: ck.seq,
 		Op: Op{Servers: servers, Type: OpJoin},
 	}
@@ -65,7 +65,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	command := kvraft.Command{
+	command := kvraft.Args{
 		ClientId: ck.clientId, Seq: ck.seq,
 		Op: Op{GIDs: gids, Type: OpLeave},
 	}
@@ -73,7 +73,7 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	command := kvraft.Command{
+	command := kvraft.Args{
 		ClientId: ck.clientId, Seq: ck.seq,
 		Op: Op{Shard: shard, GID: gid, Type: OpMove},
 	}

@@ -25,12 +25,16 @@ type Server struct {
 	shutdown chan struct{}
 }
 
-func (srv *Server) HandleRPC(args *Command, reply *Reply) {
-	if srv.sm.IsDuplicate(args.ClientId, args.Seq, reply) {
+func (srv *Server) HandleRPC(args *Args, reply *Reply) {
+	if !srv.sm.Check(args, reply) {
 		return
 	}
 
-	index, _, isLeader := srv.Rf.Start(*args)
+	srv.Execute(*args, reply)
+}
+
+func (srv *Server) Execute(command any, reply *Reply) {
+	index, _, isLeader := srv.Rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -47,7 +51,7 @@ func (srv *Server) HandleRPC(args *Command, reply *Reply) {
 		reply.Err = ErrServerShutdown
 	}
 
-	go srv.notifier.Unregister(index)
+	srv.notifier.Unregister(index)
 }
 
 func (srv *Server) maybeSnapshot(index int) {
@@ -120,7 +124,7 @@ func (srv *Server) killed() bool {
 
 func NewServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	maxraftstate int, stateMachine StateMachine) *Server {
-	labgob.Register(Command{})
+	labgob.Register(Args{})
 
 	applyCh := make(chan raft.ApplyMsg)
 	srv := &Server{
