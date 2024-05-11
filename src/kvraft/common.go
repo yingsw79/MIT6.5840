@@ -16,8 +16,6 @@ type Err string
 
 type StateMachine interface {
 	ApplyCommand(any, *Reply) bool
-	ApplySnapshot([]byte) error
-	Snapshot() ([]byte, error)
 	Check(*Args, *Reply) bool
 }
 

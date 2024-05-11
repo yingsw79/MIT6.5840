@@ -17,7 +17,7 @@ const (
 )
 
 type Shard struct {
-	KV     kvraft.KVStateMachine
+	KV     *kvraft.MemoryKVStateMachine
 	Status ShardStatus
 }
 
@@ -43,7 +43,7 @@ func (m *MemoryShardKVStateMachine) canPerformNextConfig() bool {
 }
 
 func (m *MemoryShardKVStateMachine) updateConfig() {
-	
+
 }
 
 func (m *MemoryShardKVStateMachine) Check(args *kvraft.Args, reply *kvraft.Reply) bool {

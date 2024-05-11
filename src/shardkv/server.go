@@ -28,14 +28,15 @@ type ShardKV struct {
 	// maxraftstate int // snapshot if log grows this big
 	// shards map[int]*Shard
 
-	// curConfig, wlastConfig shardctrler.Config
+	// curConfig, lastConfig shardctrler.Config
 	// sm ShardKVStateMachine
 	*kvraft.Server
 	// Your definitions here.
 }
 
 func (srv *ShardKV) UpdateConfig() {
-
+	cfg := srv.sc.Query(-1)
+	
 }
 
 // the tester calls Kill() when a ShardKV instance won't

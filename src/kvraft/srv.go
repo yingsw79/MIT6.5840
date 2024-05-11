@@ -1,6 +1,8 @@
 package kvraft
 
 import (
+	"bytes"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,7 +19,9 @@ type Server struct {
 
 	maxraftstate int
 
-	sm       StateMachine
+	mu sync.Mutex
+	sm StateMachine
+
 	notifier *Notifier
 
 	lastApplied int
@@ -26,7 +30,7 @@ type Server struct {
 }
 
 func (srv *Server) HandleRPC(args *Args, reply *Reply) {
-	if !srv.sm.Check(args, reply) {
+	if !srv.Check(args, reply) {
 		return
 	}
 
@@ -59,7 +63,7 @@ func (srv *Server) maybeSnapshot(index int) {
 		return
 	}
 
-	s, err := srv.sm.Snapshot()
+	s, err := srv.Snapshot()
 	if err != nil {
 		panic(err)
 	}
@@ -69,6 +73,43 @@ func (srv *Server) maybeSnapshot(index int) {
 
 func (srv *Server) needSnapshot() bool {
 	return srv.maxraftstate != -1 && srv.Rf.RaftStateSize() >= srv.maxraftstate
+}
+
+func (srv *Server) Check(args *Args, reply *Reply) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	return srv.sm.Check(args, reply)
+}
+
+func (srv *Server) ApplyCommand(msg any, reply *Reply) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	return srv.sm.ApplyCommand(msg, reply)
+}
+
+func (srv *Server) Snapshot() ([]byte, error) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	buf := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buf)
+	if err := enc.Encode(srv.sm); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (srv *Server) ApplySnapshot(data []byte) error {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	dec := labgob.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(srv.sm); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (srv *Server) applier() {
@@ -81,7 +122,7 @@ func (srv *Server) applier() {
 				}
 
 				var reply Reply
-				srv.sm.ApplyCommand(msg.Command, &reply)
+				srv.ApplyCommand(msg.Command, &reply)
 				srv.lastApplied = msg.CommandIndex
 
 				if currentTerm, isLeader := srv.Rf.GetState(); isLeader && msg.CommandTerm == currentTerm {
@@ -95,7 +136,7 @@ func (srv *Server) applier() {
 					continue
 				}
 
-				if err := srv.sm.ApplySnapshot(msg.Snapshot); err != nil {
+				if err := srv.ApplySnapshot(msg.Snapshot); err != nil {
 					panic(err)
 				}
 

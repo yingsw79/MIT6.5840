@@ -1,9 +1,7 @@
 package shardctrler
 
 import (
-	"bytes"
 	"slices"
-	"sync"
 
 	"6.5840/kvraft"
 	"6.5840/labgob"
@@ -37,9 +35,8 @@ type ConfigStateMachine interface {
 }
 
 type MemoryConfigStateMachine struct {
-	mu      sync.Mutex
 	Configs []Config
-	Cache   kvraft.Cache
+	kvraft.Cache
 }
 
 func NewMemoryConfigStateMachine() *MemoryConfigStateMachine {
@@ -110,23 +107,13 @@ func (m *MemoryConfigStateMachine) Query(num int) (Config, kvraft.Err) {
 	}
 }
 
-func (m *MemoryConfigStateMachine) Check(args *kvraft.Args, reply *kvraft.Reply) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	return m.Cache.Check(args, reply)
-}
-
 func (m *MemoryConfigStateMachine) ApplyCommand(msg any, reply *kvraft.Reply) bool {
 	c, ok := msg.(kvraft.Args)
 	if !ok {
 		return false
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.Cache.Check(&c, reply) {
+	if !m.Check(&c, reply) {
 		return false
 	}
 
@@ -143,37 +130,8 @@ func (m *MemoryConfigStateMachine) ApplyCommand(msg any, reply *kvraft.Reply) bo
 		return false
 	}
 
-	m.Cache.Store(c.ClientId, kvraft.OpContext{Seq: c.Seq, Reply: *reply})
+	m.Store(c.ClientId, kvraft.OpContext{Seq: c.Seq, Reply: *reply})
 	return true
-}
-
-func (m *MemoryConfigStateMachine) Snapshot() ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	buf := new(bytes.Buffer)
-	enc := labgob.NewEncoder(buf)
-	if err := enc.Encode(m.Configs); err != nil {
-		return nil, err
-	}
-	if err := enc.Encode(m.Cache); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (m *MemoryConfigStateMachine) ApplySnapshot(data []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	dec := labgob.NewDecoder(bytes.NewReader(data))
-	if err := dec.Decode(m.Configs); err != nil {
-		return err
-	}
-	if err := dec.Decode(&m.Cache); err != nil {
-		return err
-	}
-	return nil
 }
 
 func deepCopy(original map[int][]string) map[int][]string {

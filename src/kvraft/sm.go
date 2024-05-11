@@ -1,9 +1,6 @@
 package kvraft
 
 import (
-	"bytes"
-	"sync"
-
 	"6.5840/labgob"
 )
 
@@ -26,8 +23,7 @@ type OpContext struct {
 	Reply
 }
 
-type KVStateMachine interface {
-	StateMachine
+type KV interface {
 	Get(string) (string, Err)
 	Put(string, string) Err
 	Append(string, string) Err
@@ -47,43 +43,36 @@ func (c Cache) Check(args *Args, reply *Reply) bool {
 	return true
 }
 
-type KVStore map[string]string
+type MemoryKV map[string]string
 
-func NewKVStore() KVStore { return KVStore{} }
+func NewMemoryKV() MemoryKV { return MemoryKV{} }
 
-func (kv KVStore) Get(k string) (string, Err) {
+func (kv MemoryKV) Get(k string) (string, Err) {
 	if v, ok := kv[k]; ok {
 		return v, OK
 	}
 	return "", ErrNoKey
 }
 
-func (kv KVStore) Put(k, v string) Err {
+func (kv MemoryKV) Put(k, v string) Err {
 	kv[k] = v
 	return OK
 }
 
-func (kv KVStore) Append(k, v string) Err {
+func (kv MemoryKV) Append(k, v string) Err {
 	kv[k] += v
 	return OK
 }
 
 type MemoryKVStateMachine struct {
-	mu sync.Mutex
-	KVStore
-	Cache Cache
+	KV
+	Cache
 }
 
 func NewMemoryKVStateMachine() *MemoryKVStateMachine {
 	labgob.Register(Op{})
-	return &MemoryKVStateMachine{KVStore: NewKVStore(), Cache: NewCache()}
-}
-
-func (m *MemoryKVStateMachine) Check(args *Args, reply *Reply) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	return m.Cache.Check(args, reply)
+	labgob.Register(MemoryKV{})
+	return &MemoryKVStateMachine{KV: NewMemoryKV(), Cache: NewCache()}
 }
 
 func (m *MemoryKVStateMachine) ApplyCommand(msg any, reply *Reply) bool {
@@ -92,10 +81,7 @@ func (m *MemoryKVStateMachine) ApplyCommand(msg any, reply *Reply) bool {
 		return false
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.Cache.Check(&args, reply) {
+	if !m.Check(&args, reply) {
 		return false
 	}
 
@@ -110,35 +96,6 @@ func (m *MemoryKVStateMachine) ApplyCommand(msg any, reply *Reply) bool {
 		return false
 	}
 
-	m.Cache.Store(args.ClientId, OpContext{Seq: args.Seq, Reply: *reply})
+	m.Store(args.ClientId, OpContext{Seq: args.Seq, Reply: *reply})
 	return true
-}
-
-func (m *MemoryKVStateMachine) Snapshot() ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	buf := new(bytes.Buffer)
-	enc := labgob.NewEncoder(buf)
-	if err := enc.Encode(m.KVStore); err != nil {
-		return nil, err
-	}
-	if err := enc.Encode(m.Cache); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (m *MemoryKVStateMachine) ApplySnapshot(data []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	dec := labgob.NewDecoder(bytes.NewReader(data))
-	if err := dec.Decode(&m.KVStore); err != nil {
-		return err
-	}
-	if err := dec.Decode(&m.Cache); err != nil {
-		return err
-	}
-	return nil
 }
